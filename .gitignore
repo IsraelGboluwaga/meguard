@@ -1,0 +1,11 @@
+# Compiled binaries
+/meguard
+/meguard-*
+*.exe
+
+# Test and build artifacts
+*.out
+*.test
+
+# Editor/OS cruft
+.DS_Store
