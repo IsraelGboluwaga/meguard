@@ -10,6 +10,20 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ### Added
 
+- `--runtime` flag on `meguard run`: selects the Docker-compatible CLI that
+  enforces the sandbox (default `docker`; e.g. `--runtime podman` for a rootless
+  runtime). The daemon is the trust boundary, so a rootless runtime shrinks the
+  blast radius of a container escape from host root to an unprivileged user. The
+  pre-run notice now names the runtime it is trusting.
+
+### Security
+
+- `git clone` on the host now passes `--` before the source
+  (`git clone --depth 1 -- <source> <dir>`) so a source beginning with `-` can
+  never be parsed as a git option. Defense in depth on top of the existing
+  `isGitURL` gate, on the one host command that touches an attacker-controlled
+  string.
+
 - `meguard run <repo-url-or-path>` executes an untrusted repo inside a
   locked-down container sandbox, end to end.
   - Lifecycle: `docker create` (hardened) -> `docker cp` repo into a tmpfs ->

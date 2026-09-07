@@ -77,7 +77,7 @@ func TestResolveRepoLocalPath(t *testing.T) {
 // guarantees before anything runs.
 func TestPrintPreRunNotice(t *testing.T) {
 	var buf bytes.Buffer
-	printPreRunNotice(&buf, "./repo", sandbox.Profile{}.Normalize())
+	printPreRunNotice(&buf, "./repo", "", sandbox.Profile{}.Normalize())
 	out := buf.String()
 	for _, want := range []string{
 		"NEVER runs on the host",
@@ -85,10 +85,21 @@ func TestPrintPreRunNotice(t *testing.T) {
 		"network DENIED",
 		"force-removed",
 		sandbox.DefaultImage,
+		"docker (trust boundary)", // default runtime is surfaced
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("notice missing %q\n  got:\n%s", want, out)
 		}
+	}
+}
+
+// An explicit --runtime is echoed back in the notice so the user can see which
+// runtime (the trust boundary) is enforcing the sandbox.
+func TestPrintPreRunNoticeRuntime(t *testing.T) {
+	var buf bytes.Buffer
+	printPreRunNotice(&buf, "./repo", "podman", sandbox.Profile{}.Normalize())
+	if out := buf.String(); !strings.Contains(out, "podman (trust boundary)") {
+		t.Errorf("notice did not surface the chosen runtime\n  got:\n%s", out)
 	}
 }
 
