@@ -28,9 +28,19 @@ import "strconv"
 //	--network none                no egress at all; kills stage-2 payload fetches
 //	-w /repo                      work in the copied repo
 //	-e HOME=/home/sandbox         HOME points at the scratch tmpfs, not host home
+//
+// NETWORK, the ONE conditional flag: by default the sandbox gets --network none
+// (no stack at all). When Execute has started an egress monitor for an
+// InspectEgress run it sets p.NetworkContainer, and the sandbox instead joins
+// that monitor's network namespace via --network container:<name>. That is
+// still a no-egress configuration: the monitor's netns has no route out, only a
+// sinkhole that logs and drops. The sandbox gains NO capability from joining;
+// the netns rules are enforced by the kernel and the sandbox stays --cap-drop
+// ALL, so it cannot alter them. Every other flag above is unconditional.
 func createArgs(name string, p Profile) []string {
 	p = p.Normalize()
-	return []string{
+	netMode := networkArgs(p)
+	args := []string{
 		"create",
 		"--name", name,
 		"--user", "1000:1000",
@@ -45,11 +55,25 @@ func createArgs(name string, p Profile) []string {
 		"--pids-limit", strconv.Itoa(p.PidsLimit),
 		"--memory", p.Memory,
 		"--cpus", p.CPUs,
-		"--network", "none",
+	}
+	args = append(args, netMode...)
+	args = append(args,
 		"-w", "/repo",
 		"-e", "HOME=/home/sandbox",
 		// The image and the keep-alive command are the tail of the argv.
 		p.Image,
 		"sleep", "infinity",
+	)
+	return args
+}
+
+// networkArgs returns the network flag for the sandbox. It is the only part of
+// createArgs that is not a fixed literal, and it is still no-egress in both
+// branches: --network none (default) or joining the monitor's netns, whose only
+// route is a logging sinkhole.
+func networkArgs(p Profile) []string {
+	if p.NetworkContainer != "" {
+		return []string{"--network", "container:" + p.NetworkContainer}
 	}
+	return []string{"--network", "none"}
 }

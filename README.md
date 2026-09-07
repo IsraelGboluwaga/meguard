@@ -21,7 +21,8 @@ The five invariants meguard is built to guarantee:
 3. Sandbox defaults are locked down; configuration only ever RELAXES. The
    zero-value sandbox Profile is the safest one. A forgotten field cannot open a
    hole.
-4. Network is `--network none`. No egress at all.
+4. Network is `--network none`. No egress at all. (Opt-in `--inspect-egress`
+   keeps egress fully denied but makes each blocked attempt visible; see below.)
 5. The container is force-removed (`docker rm -f`) on success, install failure,
    panic, or Ctrl-C.
 
@@ -61,7 +62,7 @@ variants, and verification.
 
 ## Usage
 
-    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"] [--runtime CLI]
+    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"] [--runtime CLI] [--inspect-egress]
 
 `run` accepts a git URL (cloned to a temp dir that is always cleaned up) or a
 local path (copied, never bind mounted).
@@ -80,6 +81,9 @@ Examples:
     # Rootless runtime (recommended for genuinely hostile code)
     meguard run ./suspicious-repo --runtime podman
 
+    # See what the repo TRIED to reach (every attempt is still blocked)
+    meguard run ./suspicious-repo --inspect-egress
+
 meguard prints a pre-run notice listing the active protections and the runtime
 enforcing them, streams the sandbox output under a labeled section, then prints
 a result with the install exit code.
@@ -88,6 +92,28 @@ Only two values are ecosystem-specific: `--image` (default `node:20-slim`) and
 `--cmd` (default `npm install`). Ecosystem auto-detection is not implemented yet.
 `--memory` and `--cpus` are conservative internal defaults (2g / 2 CPUs) that
 will become user-configurable; a large install may need more than 2g.
+
+### Inspecting blocked egress (`--inspect-egress`)
+
+By default `--network none` gives the container no network stack at all, so a
+malicious repo cannot phone home - but a blocked attempt also leaves nothing to
+report. `--inspect-egress` opts into a still-no-egress but OBSERVABLE mode: a
+hardened monitor sidecar seals a network namespace with no route out (only a
+logging sinkhole), the sandbox joins that namespace, and every outbound TCP
+connection attempt (to any IP:port, so hardcoded C2 addresses are caught too) and
+DNS lookup is logged and dropped. Nothing ever leaves the host; you just get to
+see what the repo tried:
+
+    egress: 2 outbound attempt(s) BLOCKED (logged and dropped; none reached the network):
+      - BLOCKED tcp 185.220.101.5:443
+      - BLOCKED dns api.evil-c2.net
+
+A clean run states "0 outbound attempts observed" explicitly - absence is stated,
+never silent. The monitor image defaults to `nicolaka/netshoot` and is
+overridable with `--monitor-image`; it must provide `ip`, `iptables`, and
+`tcpdump`. The sandbox itself gains no privileges - only the monitor (which runs
+no repo code) is granted the two network capabilities it needs. Egress inspection
+is off by default so the safest posture (no network stack) stays the default.
 
 ### Choosing a runtime (the trust boundary)
 

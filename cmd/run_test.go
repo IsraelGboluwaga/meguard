@@ -110,9 +110,71 @@ func TestPrintResult(t *testing.T) {
 	for _, want := range []string{
 		"install exit code: 5",
 		"0 host secrets exposed",
+		"egress: not inspected", // default run states egress was fully denied, not silently clean
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("result missing %q\n  got:\n%s", want, out)
 		}
+	}
+}
+
+// When egress is inspected, blocked attempts must be reported line by line.
+func TestPrintResultEgressBlocked(t *testing.T) {
+	var buf bytes.Buffer
+	printResult(&buf, sandbox.Result{
+		InstallExitCode: 0,
+		EgressInspected: true,
+		Egress: []sandbox.EgressEvent{
+			{Proto: "tcp", Dest: "185.220.101.5:443"},
+			{Proto: "dns", Dest: "api.evil-c2.net"},
+		},
+	})
+	out := buf.String()
+	for _, want := range []string{
+		"2 outbound attempt(s) BLOCKED",
+		"BLOCKED tcp 185.220.101.5:443",
+		"BLOCKED dns api.evil-c2.net",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("egress result missing %q\n  got:\n%s", want, out)
+		}
+	}
+}
+
+// An inspected run with no attempts must say so explicitly, distinct from "not
+// inspected". A clean result is a stated absence, never silent.
+func TestPrintResultEgressCleanIsExplicit(t *testing.T) {
+	var buf bytes.Buffer
+	printResult(&buf, sandbox.Result{EgressInspected: true, Egress: []sandbox.EgressEvent{}})
+	if out := buf.String(); !strings.Contains(out, "0 outbound attempts observed") {
+		t.Errorf("clean inspected run must state zero attempts explicitly\n  got:\n%s", out)
+	}
+}
+
+// A run where the monitor could not be read must say so, and must NOT claim the
+// repo made zero calls.
+func TestPrintResultEgressUnreadable(t *testing.T) {
+	var buf bytes.Buffer
+	printResult(&buf, sandbox.Result{EgressInspected: true, Egress: nil})
+	out := buf.String()
+	if !strings.Contains(out, "could not be read") {
+		t.Errorf("unreadable monitor must be surfaced\n  got:\n%s", out)
+	}
+	if strings.Contains(out, "0 outbound attempts") {
+		t.Errorf("must not claim zero attempts when monitor was unreadable\n  got:\n%s", out)
+	}
+}
+
+// The pre-run notice must switch to the inspected-network wording when egress
+// inspection is on.
+func TestPrintPreRunNoticeInspectEgress(t *testing.T) {
+	var buf bytes.Buffer
+	printPreRunNotice(&buf, "./repo", "", sandbox.Profile{InspectEgress: true}.Normalize())
+	out := buf.String()
+	if !strings.Contains(out, "network INSPECTED") {
+		t.Errorf("notice should state network is inspected\n  got:\n%s", out)
+	}
+	if strings.Contains(out, "network DENIED") {
+		t.Errorf("inspected run should not also claim plain DENIED\n  got:\n%s", out)
 	}
 }

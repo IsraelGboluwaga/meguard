@@ -10,7 +10,17 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+// Compile-time assertion that DockerRunner provides egress inspection.
+var _ EgressInspector = DockerRunner{}
+
+// monitorReadyTimeout bounds how long StartMonitor waits for the monitor to
+// install its sinkhole and print the readiness marker. If it is not ready in
+// time the monitor is torn down and the run fails closed: the sandbox is never
+// created, so it can never join a netns whose egress is not yet sealed.
+const monitorReadyTimeout = 20 * time.Second
 
 // DockerRunner is a Runner backed by the `docker` CLI, invoked via os/exec.
 //
@@ -160,6 +170,94 @@ func (d DockerRunner) Remove(ctx context.Context, id string) error {
 		return fmt.Errorf("docker rm -f %s: %w: %s", id, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// StartMonitor creates and starts the egress monitor sidecar, then BLOCKS until
+// the monitor has installed its sinkhole and printed the readiness marker. Only
+// then does it return the monitor's name for the sandbox to join. If readiness
+// does not arrive within monitorReadyTimeout the monitor is force-removed and an
+// error is returned, so the caller never creates a sandbox against a netns whose
+// egress is not yet sealed (fail closed).
+//
+// SAFETY INVARIANT 4/5: on any failure here the monitor this method created is
+// removed before returning, so a partial start never leaks a container.
+func (d DockerRunner) StartMonitor(ctx context.Context, p Profile) (string, error) {
+	name, err := containerName()
+	if err != nil {
+		return "", err
+	}
+	name = "meguard-egress-" + strings.TrimPrefix(name, "meguard-")
+
+	cleanup := func() {
+		rmCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		defer cancel()
+		_ = d.Remove(rmCtx, name)
+	}
+
+	create := exec.CommandContext(ctx, d.bin(), monitorCreateArgs(name, p)...)
+	create.Stdout = io.Discard
+	var cErr bytes.Buffer
+	create.Stderr = &cErr
+	if err := create.Run(); err != nil {
+		return "", fmt.Errorf("docker create egress monitor: %w: %s", err, strings.TrimSpace(cErr.String()))
+	}
+	if err := d.Start(ctx, name); err != nil {
+		cleanup()
+		return "", err
+	}
+	if err := d.waitForMonitorReady(ctx, name); err != nil {
+		cleanup()
+		return "", err
+	}
+	return name, nil
+}
+
+// waitForMonitorReady polls the monitor's logs until the readiness marker
+// appears (sinkhole installed) or the timeout elapses.
+func (d DockerRunner) waitForMonitorReady(ctx context.Context, name string) error {
+	deadline := time.Now().Add(monitorReadyTimeout)
+	for {
+		out, err := d.captureLogs(ctx, name)
+		if err == nil && strings.Contains(out, monitorReadyMarker) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			detail := strings.TrimSpace(out)
+			if detail == "" && err != nil {
+				detail = err.Error()
+			}
+			return fmt.Errorf("egress monitor did not become ready within %s: %s", monitorReadyTimeout, detail)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+// CollectEgress reads the monitor's captured output and returns the
+// deduplicated, ordered list of blocked outbound attempts.
+func (d DockerRunner) CollectEgress(ctx context.Context, name string) ([]EgressEvent, error) {
+	out, err := d.captureLogs(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return parseEgress(out), nil
+}
+
+// captureLogs runs `docker logs <name>` and returns its combined output.
+// tcpdump writes captured lines to stdout and its banner to stderr; both are
+// wanted, and parseEgress ignores anything that is not a capture line.
+func (d DockerRunner) captureLogs(ctx context.Context, name string) (string, error) {
+	var buf bytes.Buffer
+	cmd := exec.CommandContext(ctx, d.bin(), monitorLogsArgs(name)...)
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		return buf.String(), fmt.Errorf("docker logs %s: %w", name, err)
+	}
+	return buf.String(), nil
 }
 
 // containerName returns a unique, greppable container name.

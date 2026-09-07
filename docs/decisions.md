@@ -135,3 +135,32 @@ here.
 - Reason: `--` makes it structurally impossible for a source beginning with `-`
   to be parsed as a git flag (for example `--upload-pack`), independent of the
   gate. Cheap, unconditional defense in depth on the host-side boundary.
+
+## 0014 - Egress visibility via a packet-level monitor sidecar, not a proxy
+
+- Decision: Add opt-in `--inspect-egress`. When set, a hardened monitor sidecar
+  seals its own network namespace (real uplink torn down, default route pointed
+  at a dummy sinkhole, `iptables` DROP + DNS redirect) and captures every
+  outbound SYN and DNS query with `tcpdump`; the sandbox joins that netns via
+  `--network container:<monitor>`. Blocked attempts are reported per line. The
+  default stays `--network none`. The monitor is the only container granted
+  NET_ADMIN/NET_RAW and runs NO repo code; the sandbox keeps `--cap-drop ALL`.
+  meguard waits for the monitor's readiness marker before creating the sandbox,
+  so the sandbox never joins an unsealed netns (fail closed).
+- Alternatives:
+  - A logging HTTP/S proxy (rejected: only sees proxy-aware HTTP(S); raw-socket
+    malware bypasses it silently, giving dangerous false confidence in a
+    security tool).
+  - A DNS sinkhole only (rejected: misses connections to hardcoded IPs, exactly
+    the evasion C2/miners use; packet-level SYN capture subsumes it).
+  - Keeping `--network none` and never reporting (rejected: the product promise
+    is "run it to SEE it is safe", and silent containment delivered only half of
+    that; this was the standing TODO).
+- Reason: A security tool must not under-report. Packet-level capture sees every
+  connection attempt to any IP:port plus DNS, so a hardcoded-IP beacon is logged,
+  not missed. It relaxes invariant 4 in wording only: egress is still fully
+  denied (the netns has no route out); the relaxation just makes the denial
+  observable, and it is opt-in so the zero-value posture is unchanged
+  (invariant 3). LIVE-VERIFICATION NOTE: the in-container netns/iptables script
+  needs one verification pass on a Linux Docker host; the Go layers are unit
+  tested.

@@ -10,6 +10,26 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ### Added
 
+- `--inspect-egress` flag on `meguard run`: opt-in packet-level egress
+  visibility. Instead of `--network none`, meguard starts a hardened monitor
+  sidecar (its own netns has no route out, only a logging sinkhole) and the
+  sandbox joins that netns via `--network container:<monitor>`. Every outbound
+  TCP connection attempt (to any IP:port, so hardcoded C2 is caught) and DNS
+  query is LOGGED and DROPPED; nothing ever leaves the host. The result section
+  now lists blocked attempts (e.g. `BLOCKED tcp 185.220.101.5:443`) instead of
+  the old TODO line, and states an explicit "0 outbound attempts" when the repo
+  made none. Default stays `--network none` (safest); the flag only ever RELAXES
+  to a still-no-egress, now-observable posture (invariant 3/4 preserved). A new
+  `--monitor-image` overrides the monitor image (default `nicolaka/netshoot`;
+  must provide `ip`, `iptables`, `tcpdump`). The sandbox joining the monitor
+  netns gains NO capability; the monitor is the only container granted
+  NET_ADMIN/NET_RAW and runs no repo code. Egress inspection rides on an OPTIONAL
+  `EgressInspector` interface, so the core `Runner` is unchanged and the default
+  path never touches the monitor code.
+  - LIVE-VERIFICATION NOTE: the Go orchestration, argv, output, and tcpdump
+    parser are unit tested; the in-container netns/iptables setup still needs one
+    verification pass on a real Linux Docker host. The reliable guarantee is TCP
+    SYN capture; DNS-name capture depends on the resolver redirect.
 - `--runtime` flag on `meguard run`: selects the Docker-compatible CLI that
   enforces the sandbox (default `docker`; e.g. `--runtime podman` for a rootless
   runtime). The daemon is the trust boundary, so a rootless runtime shrinks the
@@ -90,8 +110,8 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 ### Notes
 
 - The `run` binary is pure Go (no cgo) and ships as a single static file.
-- Network is `--network none`, hardcoded for this slice; no egress.
+- Network is `--network none` by default; no egress. `--inspect-egress` keeps
+  egress denied but makes blocked attempts observable via a monitor sidecar.
 - `--memory` and `--cpus` are conservative defaults that will become
   user-configurable.
-- TODO: surface blocked-egress attempts once an inspecting proxy exists.
 - scan, analyzers, and tree-sitter are NOT implemented in this slice.
