@@ -16,13 +16,27 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   unset. Node (`package.json` and lockfiles) maps to `node:20-slim` +
   `npm install`; Python (`requirements.txt` -> `pip install --user -r
   requirements.txt`, else `pyproject.toml`/`setup.py`/`setup.cfg`/`Pipfile` ->
-  `pip install --user .`) maps to `python:3.12-slim`. Precedence: node over
-  python, and `requirements.txt` over a project manifest; no match falls back to
-  the locked-down defaults. An explicit flag always wins. Detection only reads
-  file existence (no repo code runs; invariant 1) and only supplies the RELAX
-  values (never a security control; invariant 3). The pre-run notice now prints
-  the detected ecosystem. Table-driven `TestDetectEcosystem` covers the mapping
-  and precedence.
+  `pip install --user .`) maps to `python:3.12-slim`. Node and Python are the
+  only ecosystems detected for now; anything else falls back to the locked-down
+  defaults. Precedence: node over python, and `requirements.txt` over a project
+  manifest. An explicit flag always wins. Detection only reads file existence
+  (no repo code runs; invariant 1) and only supplies the RELAX values (never a
+  security control; invariant 3). The pre-run notice now prints the detected
+  ecosystem. Table-driven `TestDetectEcosystem` covers the mapping and
+  precedence.
+- `--runtime` flag on `meguard run`: selects the Docker-compatible CLI that
+  enforces the sandbox (default `docker`; e.g. `--runtime podman` for a rootless
+  runtime). The daemon is the trust boundary, so a rootless runtime shrinks the
+  blast radius of a container escape from host root to an unprivileged user. The
+  pre-run notice now names the runtime it is trusting.
+
+### Security
+
+- `git clone` on the host now passes `--` before the source
+  (`git clone --depth 1 -- <source> <dir>`) so a source beginning with `-` can
+  never be parsed as a git option. Defense in depth on top of the existing
+  `isGitURL` gate, on the one host command that touches an attacker-controlled
+  string.
 
 - `meguard run <repo-url-or-path>` executes an untrusted repo inside a
   locked-down container sandbox, end to end.

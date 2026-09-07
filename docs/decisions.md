@@ -108,14 +108,43 @@ here.
   reproducible from a single tag. Deferring the cgo variant avoids per-platform C
   toolchain complexity in CI until it actually buys something.
 
-## 0012 - Ecosystem auto-detection from repo manifests
+## 0012 - Expose the runtime as a user flag; prefer rootless for hostile code
+
+- Decision: Add `--runtime` to `meguard run`, wiring straight to
+  `DockerRunner.Binary` (default `docker`), and steer users toward a rootless
+  runtime (`--runtime podman`) for genuinely hostile code. Surface the chosen
+  runtime in the pre-run notice, labeled the trust boundary.
+- Alternatives: Keep `DockerRunner.Binary` unexposed and hardcode `docker`
+  (rejected: the runtime is the single largest residual risk per decision 0008,
+  yet was unreachable from the CLI, so users could not pick the safer backend);
+  default to `podman` (rejected: docker is the most commonly installed runtime,
+  and a wrong default fails preflight for most users).
+- Reason: Per decision 0008 the daemon is the trust boundary and rootless
+  Podman removes the root-daemon boundary. Making that choice a first-class,
+  documented flag turns the biggest available blast-radius reduction from a
+  code-only struct field into something a user can actually select, without
+  changing any hardening default.
+
+## 0013 - Terminate git clone options with `--`
+
+- Decision: Clone with `git clone --depth 1 -- <source> <dir>`.
+- Alternatives: Rely on the `isGitURL` prefix gate alone (rejected: correct
+  today, but a single point of failure on the one host command that parses an
+  attacker-controlled string; a future change to the gate could silently
+  reintroduce option injection).
+- Reason: `--` makes it structurally impossible for a source beginning with `-`
+  to be parsed as a git flag (for example `--upload-pack`), independent of the
+  gate. Cheap, unconditional defense in depth on the host-side boundary.
+
+## 0014 - Ecosystem auto-detection from repo manifests
 
 - Decision: When `--image` / `--cmd` are unset, detect the ecosystem by reading
   the repo's top-level manifest files (`sandbox.DetectEcosystem`) and supply the
   image + install command. Ordered detectors, first match wins: node before
-  python; within python, `requirements.txt` before a project manifest. No match
-  falls back to the locked-down defaults; an explicit flag always overrides.
-  Reverses the earlier "auto-detection is out of scope (tier-2)" note.
+  python; within python, `requirements.txt` before a project manifest. Node and
+  python are the only ecosystems detected for now. No match falls back to the
+  locked-down defaults; an explicit flag always overrides. Reverses the earlier
+  "auto-detection is out of scope (tier-2)" note.
 - Alternatives: Keep requiring `--image`/`--cmd` (rejected: needless friction
   for the two common cases meguard targets); read manifest CONTENTS to pick
   package managers (yarn/pnpm/poetry) precisely (deferred: node:20-slim ships
