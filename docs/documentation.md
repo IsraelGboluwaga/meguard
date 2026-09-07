@@ -66,8 +66,10 @@ field, so:
 
 `DetectEcosystem` (in `internal/sandbox/detect.go`) chooses the two RELAX values
 (image and install command) from the repo's manifests so the common Node and
-Python cases need no flags. It is an ordered list of detectors; the first whose
-marker files exist at the repo root wins:
+Python cases need no flags. Node and Python are the only ecosystems detected for
+now; any other (Go, Rust, Ruby, and so on) is unrecognized and falls back to the
+node defaults, so it needs an explicit `--image`/`--cmd`. It is an ordered list
+of detectors; the first whose marker files exist at the repo root wins:
 
 | Detected | Markers (any) | Image | Install command |
 | --- | --- | --- | --- |

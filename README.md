@@ -89,7 +89,11 @@ result with the install exit code.
 
 Two values are ecosystem-specific: `--image` and `--cmd`. When you leave them
 unset, meguard picks them by inspecting the repo's top-level manifest files (it
-only reads which files exist; it never runs repo code):
+only reads which files exist; it never runs repo code).
+
+Only **node** and **python** are auto-detected for now. Any other ecosystem
+(Go, Rust, Ruby, and so on) is not yet recognized and falls back to the node
+defaults, so run it with an explicit `--image` and `--cmd`.
 
 | Detected | Markers (any) | Image | Install command |
 | --- | --- | --- | --- |
