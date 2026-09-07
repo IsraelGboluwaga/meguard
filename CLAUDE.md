@@ -65,9 +65,14 @@ Required hardening flags on create (see `internal/sandbox/args.go`):
     -e HOME=/home/sandbox
 
 Only two ecosystem-specific values are configurable: `--image` (default
-node:20-slim) and `--cmd` (default `npm install`). Ecosystem auto-detection is
-OUT of scope (TODO tier-2). `--memory` and `--cpus` are conservative defaults
-that will become user-configurable; a large install may need more than 2g.
+node:20-slim) and `--cmd` (default `npm install`). When they are unset they are
+auto-detected from the repo's manifests by `sandbox.DetectEcosystem` (node and
+python; see `internal/sandbox/detect.go`); an explicit flag always wins and an
+unrecognized repo falls back to the node defaults. Detection reads only file
+existence (no repo code runs; invariant 1) and only ever supplies these two
+RELAX values, never a security control (invariant 3). `--memory` and `--cpus`
+are conservative defaults that will become user-configurable; a large install
+may need more than 2g.
 
 ## Runtime requirement
 

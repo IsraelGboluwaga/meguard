@@ -10,6 +10,20 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ### Added
 
+- Ecosystem auto-detection (`sandbox.DetectEcosystem` in
+  `internal/sandbox/detect.go`): `run` inspects the repo's top-level manifest
+  files and picks the image and install command when `--image` / `--cmd` are
+  unset. Node (`package.json` and lockfiles) maps to `node:20-slim` +
+  `npm install`; Python (`requirements.txt` -> `pip install --user -r
+  requirements.txt`, else `pyproject.toml`/`setup.py`/`setup.cfg`/`Pipfile` ->
+  `pip install --user .`) maps to `python:3.12-slim`. Node and Python are the
+  only ecosystems detected for now; anything else falls back to the locked-down
+  defaults. Precedence: node over python, and `requirements.txt` over a project
+  manifest. An explicit flag always wins. Detection only reads file existence
+  (no repo code runs; invariant 1) and only supplies the RELAX values (never a
+  security control; invariant 3). The pre-run notice now prints the detected
+  ecosystem. Table-driven `TestDetectEcosystem` covers the mapping and
+  precedence.
 - `--runtime` flag on `meguard run`: selects the Docker-compatible CLI that
   enforces the sandbox (default `docker`; e.g. `--runtime podman` for a rootless
   runtime). The daemon is the trust boundary, so a rootless runtime shrinks the
@@ -31,8 +45,9 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
     (always).
   - Accepts a git URL (cloned to a temp dir, always cleaned up) or a local path
     (copied, never bind mounted).
-  - `--image` (default `node:20-slim`) and `--cmd` (default `npm install`) are
-    the only two ecosystem-specific values. Auto-detection is out of scope.
+  - `--image` and `--cmd` are the only two ecosystem-specific values; when unset
+    they are auto-detected from the repo's manifests (see below), else fall back
+    to `node:20-slim` / `npm install`.
   - Pre-run notice listing active protections; streamed sandbox output; a result
     with the install exit code and "0 host secrets exposed (by construction)".
 - Hardening on the container: `--user 1000:1000`, `--cap-drop ALL`,
