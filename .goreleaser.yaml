@@ -1,0 +1,96 @@
+# goreleaser configuration for meguard.
+# Docs: https://goreleaser.com  (schema: version 2)
+#
+# What this produces on a tag push (see .github/workflows/release.yml):
+#   - cross-platform binaries (macOS + Linux, amd64 + arm64)
+#   - a checksums.txt (SHA256)
+#   - a GitHub Release with the archives attached
+#   - a Homebrew formula pushed to github.com/IsraelGboluwaga/homebrew-tap
+#
+# NOTE on build variants: this ships the PURE static (CGO_ENABLED=0) binary,
+# which is meguard's only meaningful variant today (there is no cgo code yet).
+# When scan lands with the tree-sitter AST analyzer, add a second build id with
+# CGO_ENABLED=1 and `-tags cgo` (per-OS runners for the C toolchain) and make the
+# full cgo binary the primary download, keeping this pure build as the
+# zero-dependency alternative. See docs/launch.md.
+version: 2
+
+project_name: meguard
+
+before:
+  hooks:
+    - go build ./...
+    - go test ./...
+
+builds:
+  - id: meguard
+    main: .
+    binary: meguard
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/IsraelGboluwaga/meguard/cmd.version={{ .Version }}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: IsraelGboluwaga
+    name: meguard
+  draft: false
+  prerelease: auto
+
+# Homebrew cask published to the tap repo, enabling `brew install`. goreleaser v2
+# uses homebrew_casks (formulae via `brews` are deprecated). Casks are macOS
+# only; Linux users install with `go install` or the release tarball.
+#
+# Requires a repo-scoped PAT in the HOMEBREW_TAP_GITHUB_TOKEN secret (the default
+# GITHUB_TOKEN cannot push to a different repository), and the tap repo
+# (IsraelGboluwaga/homebrew-tap) must already exist.
+homebrew_casks:
+  - name: meguard
+    repository:
+      owner: IsraelGboluwaga
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/IsraelGboluwaga/meguard"
+    description: "Safely execute untrusted repos inside a locked-down container sandbox"
+    caveats: |
+      meguard needs a Docker-compatible runtime on PATH. Docker Desktop is NOT
+      required; any of these work: Docker, OrbStack, Colima, or Podman.
+    # The release binary is not code-signed, so strip the Gatekeeper quarantine
+    # attribute on install; otherwise macOS blocks the unsigned binary.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/meguard"]
+          end

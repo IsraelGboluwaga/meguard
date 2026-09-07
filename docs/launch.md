@@ -58,33 +58,56 @@ full variant, build from source with `-tags cgo` as above.
 
 ## Release automation
 
-Releases are cut with GitHub Actions plus goreleaser, producing cross-platform
-binaries with SHA256 checksums. Both variants are published:
+Releases are cut with GitHub Actions plus goreleaser. The config lives in
+`.goreleaser.yaml` and the workflow in `.github/workflows/release.yml`. On a
+semver tag push (`v*`) the pipeline runs `go build ./...` and `go test ./...`,
+builds cross-platform binaries (macOS + Linux, amd64 + arm64), writes a
+`checksums.txt` (SHA256), publishes a GitHub Release with the archives attached,
+and pushes a Homebrew formula to the tap repo.
 
-- The full cgo binary is the DEFAULT/PRIMARY download.
-- The pure static binary is the zero-dependency ALTERNATIVE.
+Current variant: the release ships the PURE static (`CGO_ENABLED=0`) binary,
+which is meguard's only meaningful variant today (there is no cgo code yet). When
+scan lands with the tree-sitter AST analyzer, add a second `builds` entry with
+`CGO_ENABLED=1` and `-tags cgo` (per-OS runners for the C toolchain) and make the
+full cgo binary the primary download, keeping the pure build as the
+zero-dependency alternative.
 
-Sketch of the pipeline (to be committed under `.github/workflows/`):
+### One-time setup before the first release
 
-- On a tag push (`v*`), run `go test ./...` and `go vet ./...`.
-- Build the pure variant with `CGO_ENABLED=0` for each target OS/arch.
-- Build the full variant with `CGO_ENABLED=1 -tags cgo` using per-platform C
-  toolchains (native runners or cross-compilers).
-- Generate SHA256 checksums for every artifact.
-- Publish a GitHub Release with both variants attached, the cgo build listed
-  first as the primary download and the pure build labeled as the
-  zero-dependency alternative.
+1. Create the tap repository `github.com/IsraelGboluwaga/homebrew-tap` (public,
+   empty is fine). Homebrew derives the tap name from the `homebrew-` prefix.
+2. Create a Personal Access Token that can push to that tap repo (a fine-grained
+   token with Contents: read/write on `homebrew-tap`, or a classic token with
+   `repo` scope). The default `GITHUB_TOKEN` cannot push to a different repo.
+3. Add it to THIS repo as an Actions secret named `HOMEBREW_TAP_GITHUB_TOKEN`
+   (Settings > Secrets and variables > Actions).
+4. Add a `LICENSE` file and set `brews[0].license` in `.goreleaser.yaml` to the
+   matching SPDX id (for example `MIT`). Homebrew's audit expects a license.
+   This is currently commented out with a TODO.
+
+### Cutting a release
+
+    git tag v0.1.0
+    git push origin v0.1.0
+
+The workflow does the rest. To validate the config locally before tagging:
+
+    goreleaser check
+    goreleaser release --snapshot --clean   # dry run, no publish
 
 ## Versioning stance
 
 Stay on 0.x until the CLI surface and any JSON schema (scan output) stabilize.
-Breaking changes are expected during 0.x. Follow semver once 1.0 is cut.
+Breaking changes are expected during 0.x. Follow semver once 1.0 is cut. The
+release version is injected into the binary via ldflags and shown by
+`meguard --version`.
 
 ## Future distribution
 
-- Homebrew tap (`brew install IsraelGboluwaga/tap/meguard`).
-- A `curl | sh` installer script that downloads the right variant and verifies
-  its checksum.
+- A `curl | sh` installer script that downloads the right binary and verifies its
+  checksum against `checksums.txt`.
+- Once scan ships: publish both build variants (full cgo primary, pure static
+  alternative) in the same release.
 
 ## Verify after install
 

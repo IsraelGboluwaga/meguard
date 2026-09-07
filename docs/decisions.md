@@ -94,3 +94,16 @@ here.
   in-process, avoids host `tar` quirks (AppleDouble files, xattr warnings,
   mount-point metadata errors). Cost: the image must contain `tar` (standard in
   Debian and Alpine bases).
+
+## 0011 - Distribute via goreleaser + a Homebrew tap; pure build first
+
+- Decision: Ship releases with goreleaser and GitHub Actions, publishing a
+  Homebrew formula to a `homebrew-tap` repo. Release the pure static
+  (CGO_ENABLED=0) binary now; add the cgo/full variant when scan exists.
+- Alternatives: apt/PPA (rejected: needs hosted Debian repo infrastructure, too
+  heavy for 0.x); ship both variants immediately (rejected: no cgo code exists
+  yet, so a cgo build is identical to the pure build today).
+- Reason: Homebrew is the lowest-friction path for a Go CLI and works on macOS
+  and Linux; goreleaser makes the formula, checksums, and cross-builds
+  reproducible from a single tag. Deferring the cgo variant avoids per-platform C
+  toolchain complexity in CI until it actually buys something.

@@ -54,6 +54,13 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   behind cgo build tags with a labeled no-op fallback; two build variants).
 - Docs and contract: CLAUDE.md, README.md, docs/documentation.md, docs/launch.md,
   docs/decisions.md, and subagent definitions under `.claude/agents/`.
+- Release pipeline: `.goreleaser.yaml` and `.github/workflows/release.yml` build
+  cross-platform pure-static binaries (macOS/Linux, amd64/arm64) with SHA256
+  checksums on a `v*` tag, publish a GitHub Release, and push a Homebrew formula
+  to the `IsraelGboluwaga/homebrew-tap` tap (enables `brew install`). Requires a
+  one-time tap repo, a `HOMEBREW_TAP_GITHUB_TOKEN` secret, and a LICENSE (see
+  docs/launch.md).
+- `meguard --version`, with the version injected at release time via ldflags.
 
 ### Changed
 

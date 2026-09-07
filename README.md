@@ -40,16 +40,24 @@ Desktop. Any of these work with no configuration change:
 - Colima (macOS/Linux, lightweight) - recommended for lightness
 - Podman (daemonless, rootless) - recommended for security
 
-Build from source (pure static, cgo-free `run` binary):
-
-    CGO_ENABLED=0 go build -o meguard .
-
-Or install with Go:
+Install with Go (works today):
 
     go install github.com/IsraelGboluwaga/meguard@latest
 
-See [docs/launch.md](docs/launch.md) for both build variants, release steps, and
-verification.
+Or build from source (pure static, cgo-free `run` binary):
+
+    CGO_ENABLED=0 go build -o meguard .
+
+Homebrew (available once the first release is tagged; see docs/launch.md):
+
+    brew install IsraelGboluwaga/tap/meguard
+
+Check the version:
+
+    meguard --version
+
+See [docs/launch.md](docs/launch.md) for the release pipeline, both build
+variants, and verification.
 
 ## Usage
 

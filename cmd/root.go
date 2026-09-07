@@ -12,10 +12,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// version is the release version, injected at build time by goreleaser via
+// -ldflags "-X github.com/IsraelGboluwaga/meguard/cmd.version=...". It is "dev"
+// for local and source builds.
+var version = "dev"
+
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "meguard",
-		Short: "Safely execute untrusted repos inside a locked-down container sandbox",
+		Use:     "meguard",
+		Version: version,
+		Short:   "Safely execute untrusted repos inside a locked-down container sandbox",
 		Long: `meguard runs untrusted repositories (for example fake-interview repos that
 hide infostealer or RAT payloads) inside a locked-down container sandbox.
 
