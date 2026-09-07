@@ -77,13 +77,14 @@ func TestResolveRepoLocalPath(t *testing.T) {
 // guarantees before anything runs.
 func TestPrintPreRunNotice(t *testing.T) {
 	var buf bytes.Buffer
-	printPreRunNotice(&buf, "./repo", sandbox.Profile{}.Normalize())
+	printPreRunNotice(&buf, "./repo", "node", sandbox.Profile{}.Normalize())
 	out := buf.String()
 	for _, want := range []string{
 		"NEVER runs on the host",
 		"NO host $HOME and NO repo bind mounts",
 		"network DENIED",
 		"force-removed",
+		"ecosystem:        node",
 		sandbox.DefaultImage,
 	} {
 		if !strings.Contains(out, want) {

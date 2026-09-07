@@ -68,21 +68,41 @@ local path (copied, never bind mounted).
 
 Examples:
 
-    # Default: Node repo, runs `npm install` inside node:20-slim
+    # Node repo (package.json): auto-detected, runs `npm install` in node:20-slim
     meguard run https://github.com/some/suspicious-repo.git
 
     # A local path
     meguard run ./downloaded-take-home
 
-    # A Python repo
+    # A Python repo (requirements.txt / pyproject.toml): auto-detected, runs pip
+    # install in python:3.12-slim - no flags needed
+    meguard run ./py-repo
+
+    # Override detection explicitly when you want a specific image or command
     meguard run ./py-repo --image python:3.12-slim --cmd "pip install -r requirements.txt"
 
-meguard prints a pre-run notice listing the active protections, streams the
-sandbox output under a labeled section, then prints a result with the install
-exit code.
+meguard prints a pre-run notice listing the detected ecosystem and the active
+protections, streams the sandbox output under a labeled section, then prints a
+result with the install exit code.
 
-Only two values are ecosystem-specific: `--image` (default `node:20-slim`) and
-`--cmd` (default `npm install`). Ecosystem auto-detection is not implemented yet.
+### Ecosystem auto-detection
+
+Two values are ecosystem-specific: `--image` and `--cmd`. When you leave them
+unset, meguard picks them by inspecting the repo's top-level manifest files (it
+only reads which files exist; it never runs repo code):
+
+| Detected | Markers (any) | Image | Install command |
+| --- | --- | --- | --- |
+| node | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` | `node:20-slim` | `npm install` |
+| python | `requirements.txt` | `python:3.12-slim` | `pip install --user -r requirements.txt` |
+| python | `pyproject.toml`, `setup.py`, `setup.cfg`, `Pipfile` | `python:3.12-slim` | `pip install --user .` |
+
+Precedence: node wins over python for a polyglot repo, and `requirements.txt`
+wins over a project manifest within python. When nothing matches, meguard falls
+back to the locked-down defaults (`node:20-slim` / `npm install`). An explicit
+`--image` or `--cmd` always overrides detection for that value; pip uses
+`--user` so installs land on the writable HOME tmpfs under the read-only root.
+
 `--memory` and `--cpus` are conservative internal defaults (2g / 2 CPUs) that
 will become user-configurable; a large install may need more than 2g.
 

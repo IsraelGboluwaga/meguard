@@ -62,6 +62,40 @@ field, so:
 `Normalize` fills empty fields with conservative defaults (node:20-slim,
 `npm install`, 2g, 2 CPUs, 512 PIDs) and never removes a control.
 
+### Ecosystem detection
+
+`DetectEcosystem` (in `internal/sandbox/detect.go`) chooses the two RELAX values
+(image and install command) from the repo's manifests so the common Node and
+Python cases need no flags. It is an ordered list of detectors; the first whose
+marker files exist at the repo root wins:
+
+| Detected | Markers (any) | Image | Install command |
+| --- | --- | --- | --- |
+| node | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` | `node:20-slim` | `npm install` |
+| python | `requirements.txt` | `python:3.12-slim` | `pip install --user -r requirements.txt` |
+| python | `pyproject.toml`, `setup.py`, `setup.cfg`, `Pipfile` | `python:3.12-slim` | `pip install --user .` |
+
+Precedence is encoded by detector order: node precedes python (a polyglot repo
+is treated as node, the dominant ecosystem among the untrusted take-home repos
+meguard targets), and within python `requirements.txt` precedes a project
+manifest. When no detector matches, `DetectEcosystem` returns false and the
+caller falls back to the locked-down Profile defaults via `Normalize`.
+
+Detection is safe by construction: it only calls `os.Stat` on top-level files
+(never recursively, never reading contents) and runs no repo code, so invariant
+1 holds - choosing an image is not executing the repo. It only ever supplies the
+image and install command, never a security control, so it cannot weaken the
+box. The node case reuses `DefaultImage` / `DefaultInstallCmd` so it cannot
+drift from the package defaults. pip is given `--user` so its writes go to
+`$HOME/.local` on the `/home/sandbox` tmpfs; a plain `pip install` would fail
+against the read-only system site-packages.
+
+`cmd/run.go` calls `DetectEcosystem` after resolving the repo and fills only the
+fields the user left unset: an explicit `--image` or `--cmd` always wins. The
+pre-run notice prints the detected ecosystem (or "unknown (using locked-down
+defaults)"). To add an ecosystem, append a detector to the `detectors` slice;
+nothing else in the pipeline changes.
+
 ### The lifecycle
 
 `Execute` (in `internal/sandbox/execute.go`) runs:
