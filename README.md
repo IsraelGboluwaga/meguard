@@ -61,7 +61,7 @@ variants, and verification.
 
 ## Usage
 
-    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"]
+    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"] [--runtime CLI]
 
 `run` accepts a git URL (cloned to a temp dir that is always cleaned up) or a
 local path (copied, never bind mounted).
@@ -77,14 +77,27 @@ Examples:
     # A Python repo
     meguard run ./py-repo --image python:3.12-slim --cmd "pip install -r requirements.txt"
 
-meguard prints a pre-run notice listing the active protections, streams the
-sandbox output under a labeled section, then prints a result with the install
-exit code.
+    # Rootless runtime (recommended for genuinely hostile code)
+    meguard run ./suspicious-repo --runtime podman
+
+meguard prints a pre-run notice listing the active protections and the runtime
+enforcing them, streams the sandbox output under a labeled section, then prints
+a result with the install exit code.
 
 Only two values are ecosystem-specific: `--image` (default `node:20-slim`) and
 `--cmd` (default `npm install`). Ecosystem auto-detection is not implemented yet.
 `--memory` and `--cpus` are conservative internal defaults (2g / 2 CPUs) that
 will become user-configurable; a large install may need more than 2g.
+
+### Choosing a runtime (the trust boundary)
+
+The container daemon is the trust boundary: meguard's hardening flags are only
+as strong as the runtime that enforces them, and the shared host kernel is the
+ceiling. `--runtime` selects any Docker-compatible CLI (default `docker`). For
+genuinely hostile code, prefer a rootless runtime such as `--runtime podman` so
+that a container escape lands as an unprivileged user rather than as host root.
+meguard does not defend against a host-kernel or root-daemon escape; a rootless
+runtime is the single biggest reduction in blast radius available today.
 
 ## Troubleshooting
 

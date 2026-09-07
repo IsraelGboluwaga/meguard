@@ -96,10 +96,23 @@ Desktop is not required. This turns a raw daemon connection error into guidance
 and avoids showing protections for a run that cannot start.
 
 The repo source is resolved in `cmd/run.go`:
-- A git URL is `git clone --depth 1`ed to a temp dir that is always removed.
-  Cloning does not run install hooks, so it is safe on the host.
+- A git URL is `git clone --depth 1 -- <source>`ed to a temp dir that is always
+  removed. Cloning does not run install hooks, so it is safe on the host. The
+  `--` terminates git option parsing so an attacker-controlled source that
+  begins with `-` can never be smuggled in as a git flag (defense in depth on
+  top of the `isGitURL` gate). `--depth 1` also avoids submodule recursion.
 - A local path is used in place (its contents are copied into the container, not
   bind mounted).
+
+### Runtime selection (`--runtime`)
+
+`--runtime` chooses the Docker-compatible CLI that enforces the sandbox (default
+`docker`); it maps directly to `DockerRunner.Binary`. Any compatible CLI works
+(`podman`, `nerdctl`, ...). Because the daemon is the trust boundary (see the
+threat model), a rootless runtime such as `--runtime podman` is preferred for
+hostile code: a container escape then lands as an unprivileged user instead of
+host root. The pre-run notice prints the chosen runtime and labels it the trust
+boundary.
 
 ## Hardening flags and the door each closes
 
@@ -142,10 +155,17 @@ What meguard denies:
   no-new-privileges, non-root user, and force-removal on exit leave nothing
   behind and nothing to escalate through.
 
-Out of current scope: kernel escapes from the container runtime (mitigated by
-the documented gVisor/Firecracker upgrade paths), and inspecting or reporting
-blocked egress attempts (a proxy-based feature is a TODO). The `run` guarantee is
-independent of scan; scan is a separate, future, static-analysis feature.
+Out of current scope: kernel escapes from the container runtime and escapes
+through a rootful daemon (both reduced, not eliminated, by choosing a rootless
+runtime with `--runtime podman`, and further by the documented gVisor/Firecracker
+upgrade paths); and inspecting or reporting blocked egress attempts (a
+proxy-based feature is a TODO). The single largest residual risk is that the
+sandbox is only as strong as the runtime enforcing it on a shared host kernel:
+meguard raises the bar with cap-drop, no-new-privileges, read-only root,
+non-root user, and no network, but a kernel or root-daemon 0-day still reaches
+the host. Prefer a rootless runtime for genuinely hostile code. The `run`
+guarantee is independent of scan; scan is a separate, future, static-analysis
+feature.
 
 ## scan analyzer architecture (documented only; not implemented)
 

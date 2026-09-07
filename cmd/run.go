@@ -18,6 +18,7 @@ const sectionRule = "----------------------------------------"
 func newRunCmd() *cobra.Command {
 	var image string
 	var installCmd string
+	var runtimeBin string
 
 	cmd := &cobra.Command{
 		Use:   "run <repo-url-or-path>",
@@ -27,10 +28,15 @@ sandbox and runs an install command inside it. Repo code never runs on the host.
 
 The container has no network, no host bind mounts, dropped capabilities, a
 read-only root, and a scratch HOME that holds no host secrets. The container is
-force-removed on exit, panic, or Ctrl-C.`,
+force-removed on exit, panic, or Ctrl-C.
+
+The container daemon is the trust boundary: the hardening flags are only as
+strong as the runtime that enforces them. For hostile code, prefer a rootless
+runtime via --runtime (for example "podman") so a container escape lands as an
+unprivileged user rather than host root.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			return runSandbox(c.Context(), args[0], image, installCmd, c.OutOrStdout(), c.ErrOrStderr())
+			return runSandbox(c.Context(), args[0], image, installCmd, runtimeBin, c.OutOrStdout(), c.ErrOrStderr())
 		},
 	}
 
@@ -38,11 +44,16 @@ force-removed on exit, panic, or Ctrl-C.`,
 	// Auto-detection is out of scope for this slice (TODO tier-2).
 	cmd.Flags().StringVar(&image, "image", "", "container image (default node:20-slim)")
 	cmd.Flags().StringVar(&installCmd, "cmd", "", `install command run inside the sandbox (default: "npm install")`)
+	// The runtime is the trust boundary. Empty means "docker"; any
+	// Docker-compatible CLI works (podman, nerdctl, ...). Rootless runtimes
+	// shrink the blast radius of a container escape and are preferred for
+	// hostile code.
+	cmd.Flags().StringVar(&runtimeBin, "runtime", "", `Docker-compatible runtime CLI (default "docker"; e.g. "podman" for rootless)`)
 	return cmd
 }
 
-func runSandbox(ctx context.Context, source, image, installCmd string, stdout, stderr io.Writer) error {
-	runner := sandbox.DockerRunner{}
+func runSandbox(ctx context.Context, source, image, installCmd, runtimeBin string, stdout, stderr io.Writer) error {
+	runner := sandbox.DockerRunner{Binary: runtimeBin}
 
 	// Fail fast with actionable guidance if no runtime is reachable, before we
 	// clone anything or print a pre-run notice for a run that cannot start.
@@ -63,7 +74,7 @@ func runSandbox(ctx context.Context, source, image, installCmd string, stdout, s
 		profile.InstallCmd = fields
 	}
 
-	printPreRunNotice(stdout, source, profile.Normalize())
+	printPreRunNotice(stdout, source, runtimeBin, profile.Normalize())
 
 	fmt.Fprintln(stdout, sectionRule)
 	fmt.Fprintln(stdout, "SANDBOX OUTPUT")
@@ -99,7 +110,12 @@ func resolveRepo(ctx context.Context, source string, stderr io.Writer) (string, 
 		}
 		cleanup := func() { _ = os.RemoveAll(dir) }
 
-		gc := exec.CommandContext(ctx, "git", "clone", "--depth", "1", source, dir)
+		// "--" terminates option parsing so a source beginning with "-" can
+		// never be smuggled in as a git flag (for example --upload-pack). The
+		// isGitURL gate already rejects such strings, but the terminator is
+		// unconditional defense in depth on the one command that touches an
+		// attacker-controlled string on the host.
+		gc := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--", source, dir)
 		gc.Stdout = stderr
 		gc.Stderr = stderr
 		if err := gc.Run(); err != nil {
@@ -137,9 +153,14 @@ func isGitURL(source string) bool {
 	return strings.HasSuffix(source, ".git")
 }
 
-func printPreRunNotice(w io.Writer, source string, p sandbox.Profile) {
+func printPreRunNotice(w io.Writer, source, runtimeBin string, p sandbox.Profile) {
+	runtimeName := runtimeBin
+	if runtimeName == "" {
+		runtimeName = "docker"
+	}
 	fmt.Fprintln(w, "meguard: preparing locked-down sandbox")
 	fmt.Fprintf(w, "  source:           %s\n", source)
+	fmt.Fprintf(w, "  runtime:          %s (trust boundary)\n", runtimeName)
 	fmt.Fprintf(w, "  image:            %s\n", p.Image)
 	fmt.Fprintf(w, "  install command:  %s\n", strings.Join(p.InstallCmd, " "))
 	fmt.Fprintln(w, "active protections:")
