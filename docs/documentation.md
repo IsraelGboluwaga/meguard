@@ -67,10 +67,20 @@ field, so:
 `Execute` (in `internal/sandbox/execute.go`) runs:
 
     create <hardened args> <image> sleep infinity
-    docker cp <repo>/. <id>:/repo
     docker start <id>
-    docker exec <id> <install cmd>      (stdout/stderr streamed live)
-    docker rm -f <id>                   (always)
+    docker exec -i <id> tar -xf - -C /repo   (repo streamed into the tmpfs)
+    docker exec <id> <install cmd>           (stdout/stderr streamed live)
+    docker rm -f <id>                        (always)
+
+Copy mechanism: meguard does NOT use `docker cp`. Docker refuses `docker cp` into
+a --read-only container, so meguard builds a deterministic tar stream in-process
+(internal/sandbox/copy.go, `writeRepoTar`) and pipes it to a `tar` process
+running inside the container via `docker exec -i`. That extractor writes to the
+/repo tmpfs as the sandbox user and is not subject to the read-only rootfs guard.
+The repo therefore lives in a container tmpfs with no host bind mount, exactly as
+invariant 2 requires. The container is STARTED before the copy because the copy
+runs inside it. The image must provide `tar` (standard in Debian and Alpine
+bases). The /repo tmpfs is mounted `mode=1777` so the non-root user can write it.
 
 Cleanup guarantee: immediately after a successful create, `Execute` defers a
 `Remove` that uses a DETACHED context with its own timeout. Deferred functions
@@ -101,7 +111,7 @@ From `internal/sandbox/args.go`, all unconditional:
 | `--cap-drop ALL` | Drop every Linux capability. |
 | `--security-opt no-new-privileges` | Block setuid/privilege escalation. |
 | `--read-only` | Root filesystem is immutable. |
-| `--tmpfs /repo:exec` | Repo lives in ephemeral RAM; execution allowed there. |
+| `--tmpfs /repo:exec,mode=1777` | Repo lives in ephemeral RAM; execution allowed; writable by the non-root user. |
 | `--tmpfs /home/sandbox` | Scratch HOME in RAM; holds no host secrets. |
 | `--tmpfs /tmp` | Writable scratch in RAM only. |
 | `--pids-limit 512` | Cap fork bombs. |

@@ -19,6 +19,10 @@ Note the daemon trust boundary: the container daemon runs privileged and is a
 trust boundary meguard relies on. Prefer Podman rootless where isolation matters
 most. Stronger backends (gVisor, Firecracker) are on the roadmap.
 
+The container image used by `run` must provide `tar`, which meguard uses to
+stream the repo into the sandbox tmpfs. The defaults (node:20-slim) and other
+Debian/Alpine-based images include it.
+
 ### To build meguard
 
 - Go 1.24 or newer.
@@ -92,7 +96,10 @@ Breaking changes are expected during 0.x. Follow semver once 1.0 is cut.
 
 Expected: a pre-run notice listing the active protections, streamed sandbox
 output under a labeled section, and a result with the install exit code and the
-"0 host secrets exposed (by construction)" line.
+"0 host secrets exposed (by construction)" line. Note that Hello-World has no
+package.json, so `npm install` reports a non-zero install exit code; that is the
+sandboxed command's outcome, not a meguard failure. Point `run` at a repo with a
+package.json (or pass `--cmd`) to see a zero install exit code.
 
 If meguard reports it cannot reach the runtime, confirm your Docker-compatible
 runtime is installed and running (for example `orbstack status`, `colima status`,

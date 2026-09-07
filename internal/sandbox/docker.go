@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -84,19 +83,34 @@ func (d DockerRunner) Create(ctx context.Context, p Profile) (string, error) {
 	return name, nil
 }
 
-// CopyInto runs `docker cp <srcDir>/. <id>:<destPath>`, copying the repo
-// contents into the container tmpfs. Copying does not run any repo hooks.
+// CopyInto streams the CONTENTS of srcDir into destPath inside the container.
+//
+// It does NOT use `docker cp`: Docker refuses `docker cp` into a --read-only
+// container (the rootfs read-only guard blocks it even for a tmpfs target).
+// Instead meguard builds a deterministic tar stream in-process (see
+// writeRepoTar) and pipes it to a `tar` process running inside the container via
+// `docker exec -i`. That extractor writes to the tmpfs mount as the sandbox
+// user; it is a process inside the container, so it is not subject to the
+// read-only rootfs guard. This preserves the invariant that the repo lives in a
+// container tmpfs with no host bind mount and no route to host secrets. The
+// container image must provide `tar` (standard in Debian and Alpine bases).
+//
+// The container must be running before CopyInto is called.
 func (d DockerRunner) CopyInto(ctx context.Context, id, srcDir, destPath string) error {
-	// The trailing "/." tells docker cp to copy the directory CONTENTS into
-	// destPath rather than nesting the directory itself. filepath.Join would
-	// strip the ".", so build the source explicitly.
-	src := filepath.Clean(srcDir) + "/."
-	dst := id + ":" + destPath
-	cmd := exec.CommandContext(ctx, d.bin(), "cp", src, dst)
+	pr, pw := io.Pipe()
+	go func() {
+		// Closing the writer with the build error propagates it to the reader,
+		// which surfaces as a tar failure below.
+		pw.CloseWithError(writeRepoTar(pw, srcDir))
+	}()
+	defer pr.Close()
+
+	cmd := exec.CommandContext(ctx, d.bin(), tarExtractArgs(id, destPath)...)
+	cmd.Stdin = pr
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("docker cp %s %s: %w: %s", src, dst, err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("stream repo into %s:%s via tar: %w: %s", id, destPath, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }

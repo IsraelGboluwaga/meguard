@@ -79,3 +79,18 @@ here.
 - Reason: A clear, actionable message (naming OrbStack/Colima/Podman, not just
   Docker Desktop) is better UX than a raw daemon error printed after a misleading
   pre-run notice.
+
+## 0010 - Copy the repo via a tar stream through docker exec, not docker cp
+
+- Decision: Stream a Go-built tar into a `tar` process inside the running
+  container (`docker exec -i ... tar -xf - -C /repo`) instead of `docker cp`, and
+  start the container before copying. Mount /repo tmpfs `mode=1777`.
+- Alternatives: Use `docker cp` (fails: Docker refuses it into a --read-only
+  container, confirmed in end-to-end testing); drop `--read-only` so `docker cp`
+  works (rejected: --read-only is required hardening).
+- Reason: Keeping `--read-only` is non-negotiable for a security tool, so the
+  copy must not depend on it being off. The tar-through-exec path preserves
+  invariant 2 exactly (no bind mount, repo in tmpfs) and, building the tar
+  in-process, avoids host `tar` quirks (AppleDouble files, xattr warnings,
+  mount-point metadata errors). Cost: the image must contain `tar` (standard in
+  Debian and Alpine bases).

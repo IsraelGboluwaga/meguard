@@ -55,6 +55,17 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 - Docs and contract: CLAUDE.md, README.md, docs/documentation.md, docs/launch.md,
   docs/decisions.md, and subagent definitions under `.claude/agents/`.
 
+### Changed
+
+- Copy mechanism and lifecycle order, forced by real end-to-end testing against
+  a live runtime (OrbStack): Docker refuses `docker cp` into a `--read-only`
+  container, so the repo is now streamed in as a deterministic in-process tar
+  piped to a `tar` process inside the container (`docker exec -i`). The container
+  is started before the copy (lifecycle: create, start, copy, exec). `/repo` is
+  mounted `mode=1777` so the non-root user can write it. All hardening flags,
+  including `--read-only`, are retained; the security property of invariant 2 is
+  unchanged. The container image must provide `tar` (standard in Debian/Alpine).
+
 ### Notes
 
 - The `run` binary is pure Go (no cgo) and ships as a single static file.

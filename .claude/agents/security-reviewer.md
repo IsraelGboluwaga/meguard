@@ -29,7 +29,11 @@ What to check every review:
 - `internal/sandbox/profile.go`: confirm the zero value is safe and `Normalize`
   only fills gaps, never weakens a control.
 - `cmd/run.go`: confirm the only host-side action on the repo is `git clone` (or
-  copying a local path); confirm no repo hook can run on the host.
+  reading a local path); confirm no repo hook can run on the host.
+- `internal/sandbox/copy.go`: the repo is streamed in as a tar through
+  `docker exec` (not `docker cp`, which Docker refuses on a --read-only
+  container). Confirm this is still a copy into a container tmpfs with no host
+  bind mount, and that the tar builder cannot write outside the container.
 - `internal/sandbox/execute.go` and `main.go`: confirm cleanup is deferred with a
   detached context and that signal handling cancels in-flight work.
 - Confirm `run` and `sandbox` do not import analyze (the guard test should pass).

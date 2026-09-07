@@ -15,7 +15,9 @@ The five invariants meguard is built to guarantee:
 1. Repo code NEVER runs on the host. meguard does `git clone` only (cloning does
    not run install hooks); all execution happens inside the container.
 2. NO host bind mounts of the repo or `$HOME`. The repo is copied INTO a
-   container tmpfs with `docker cp`. The container has no route to host secrets.
+   container tmpfs (streamed in as a tar through `docker exec`, because Docker
+   refuses `docker cp` into a read-only container). The container has no route to
+   host secrets.
 3. Sandbox defaults are locked down; configuration only ever RELAXES. The
    zero-value sandbox Profile is the safest one. A forgotten field cannot open a
    hole.

@@ -33,7 +33,12 @@ const cleanupTimeout = 30 * time.Second
 // Execute runs the full sandbox lifecycle and ALWAYS force-removes the
 // container:
 //
-//	create -> copy repo into tmpfs -> start -> exec install (streamed) -> rm -f
+//	create -> start -> copy repo into tmpfs -> exec install (streamed) -> rm -f
+//
+// The container is started BEFORE the repo is copied because the copy is done by
+// a tar process inside the running container (see DockerRunner.CopyInto);
+// Docker refuses `docker cp` into a --read-only container, and the tmpfs mounts
+// are only live while the container runs.
 //
 // SAFETY INVARIANT: cleanup runs on success, on install failure, on panic, and
 // on context cancellation (Ctrl-C). The deferred Remove uses a detached context
@@ -57,11 +62,11 @@ func Execute(ctx context.Context, r Runner, opts ExecuteOptions) (result Result,
 		}
 	}()
 
-	if err := r.CopyInto(ctx, id, opts.RepoDir, "/repo"); err != nil {
-		return Result{}, fmt.Errorf("copy repo into sandbox: %w", err)
-	}
 	if err := r.Start(ctx, id); err != nil {
 		return Result{}, fmt.Errorf("start sandbox: %w", err)
+	}
+	if err := r.CopyInto(ctx, id, opts.RepoDir, "/repo"); err != nil {
+		return Result{}, fmt.Errorf("copy repo into sandbox: %w", err)
 	}
 
 	code, err := r.Exec(ctx, id, p.InstallCmd, opts.Stdout, opts.Stderr)

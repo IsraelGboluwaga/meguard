@@ -84,7 +84,7 @@ func TestExecuteHappyPath(t *testing.T) {
 	if res.InstallExitCode != 7 {
 		t.Errorf("InstallExitCode = %d, want 7", res.InstallExitCode)
 	}
-	wantOrder := []string{"create", "copy", "start", "exec", "remove"}
+	wantOrder := []string{"create", "start", "copy", "exec", "remove"}
 	if !reflect.DeepEqual(f.calls, wantOrder) {
 		t.Errorf("call order = %v, want %v", f.calls, wantOrder)
 	}

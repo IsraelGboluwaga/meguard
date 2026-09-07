@@ -18,7 +18,8 @@ import "strconv"
 //	--cap-drop ALL                drop every Linux capability
 //	--security-opt no-new-privileges  block setuid/privilege escalation
 //	--read-only                   root filesystem is immutable
-//	--tmpfs /repo:exec            repo lives in ephemeral RAM, execution allowed
+//	--tmpfs /repo:exec,mode=1777  repo lives in ephemeral RAM, execution allowed,
+//	                              writable by the non-root sandbox user
 //	--tmpfs /home/sandbox         scratch HOME in RAM, holds no host secrets
 //	--tmpfs /tmp                  writable scratch in RAM only
 //	--pids-limit 512              cap fork bombs
@@ -36,7 +37,9 @@ func createArgs(name string, p Profile) []string {
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--read-only",
-		"--tmpfs", "/repo:exec",
+		// mode=1777 lets the non-root sandbox user (uid 1000) write into the
+		// tmpfs; the repo is streamed in and node_modules etc. are written here.
+		"--tmpfs", "/repo:exec,mode=1777",
 		"--tmpfs", "/home/sandbox",
 		"--tmpfs", "/tmp",
 		"--pids-limit", strconv.Itoa(p.PidsLimit),

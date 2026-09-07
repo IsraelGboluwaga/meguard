@@ -34,7 +34,7 @@ func TestCreateArgsHardening(t *testing.T) {
 		{"--cap-drop", "ALL"},
 		{"--security-opt", "no-new-privileges"},
 		{"--read-only"},
-		{"--tmpfs", "/repo:exec"},
+		{"--tmpfs", "/repo:exec,mode=1777"},
 		{"--tmpfs", "/home/sandbox"},
 		{"--tmpfs", "/tmp"},
 		{"--pids-limit", "512"},

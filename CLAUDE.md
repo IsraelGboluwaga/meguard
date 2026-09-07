@@ -34,10 +34,22 @@ Where they live in code:
 ## Container lifecycle (implemented exactly this)
 
     docker create <hardened args> <image> sleep infinity
-    docker cp <repo>/. <id>:/repo
     docker start <id>
-    docker exec <id> <install cmd>      (capture and stream stdout/stderr)
-    docker rm -f <id>                   (always)
+    docker exec -i <id> tar -xf - -C /repo   (repo streamed in; see note below)
+    docker exec <id> <install cmd>           (capture and stream stdout/stderr)
+    docker rm -f <id>                        (always)
+
+IMPLEMENTATION NOTE on invariant 2 (kept verbatim above): the mechanism is a
+tar stream through `docker exec`, NOT literal `docker cp`. End-to-end testing
+showed Docker refuses `docker cp` into a --read-only container (the read-only
+rootfs guard blocks it even for a tmpfs target). meguard builds a deterministic
+tar in-process (internal/sandbox/copy.go) and pipes it to a `tar` process inside
+the running container, which writes to the /repo tmpfs and is not subject to the
+read-only guard. This preserves the invariant's security property exactly: no
+host bind mounts, repo lives in a container tmpfs, no route to host secrets.
+Because the copy runs inside the container, the container is STARTED before the
+copy (lifecycle order: create, start, copy, exec). The image must provide `tar`
+(standard in Debian and Alpine bases).
 
 Required hardening flags on create (see `internal/sandbox/args.go`):
 
@@ -45,7 +57,7 @@ Required hardening flags on create (see `internal/sandbox/args.go`):
     --cap-drop ALL
     --security-opt no-new-privileges
     --read-only
-    --tmpfs /repo:exec  --tmpfs /home/sandbox  --tmpfs /tmp
+    --tmpfs /repo:exec,mode=1777  --tmpfs /home/sandbox  --tmpfs /tmp
     --pids-limit 512
     --memory 2g  --cpus 2
     --network none
