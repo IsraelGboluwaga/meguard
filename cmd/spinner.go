@@ -16,10 +16,10 @@ import (
 // is not a terminal (piped or redirected), keeping non-interactive output
 // clean. Frames are plain ASCII by house rule (no fancy Unicode glyphs).
 type spinner struct {
-	w     io.Writer
-	tty   bool
-	mu    sync.Mutex
-	label string
+	w      io.Writer
+	tty    bool
+	mu     sync.Mutex
+	label  string
 	stopCh chan struct{}
 	done   chan struct{}
 }

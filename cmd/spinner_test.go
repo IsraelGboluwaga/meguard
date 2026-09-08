@@ -36,9 +36,9 @@ func TestNilSpinnerIsSafe(t *testing.T) {
 func TestSpinnerLifecycleIsSafe(t *testing.T) {
 	var buf bytes.Buffer
 	sp := newSpinner(&buf)
-	sp.stop()          // stop before any start
-	sp.start("a")      // start
-	sp.start("b")      // redundant start is ignored
-	sp.stop()          // stop
-	sp.stop()          // redundant stop is ignored
+	sp.stop()     // stop before any start
+	sp.start("a") // start
+	sp.start("b") // redundant start is ignored
+	sp.stop()     // stop
+	sp.stop()     // redundant stop is ignored
 }
