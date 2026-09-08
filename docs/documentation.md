@@ -2,10 +2,11 @@
 
 ## Overview
 
-meguard executes untrusted repositories inside a locked-down container sandbox.
-This document covers the architecture of the `run` path, each hardening flag and
-the door it closes, the threat model, and the (documented-only) scan analyzer
-architecture.
+meguard executes untrusted repositories inside a locked-down container sandbox,
+and statically scans them for signs of hidden malicious code. This document
+covers the architecture of the `run` path, each hardening flag and the door it
+closes, the threat model, and the scan analyzer architecture (implemented in
+`internal/analyze`).
 
 ## Architecture
 
@@ -13,14 +14,20 @@ architecture.
 
 - `main.go` - entry point. Builds a signal-aware context (SIGINT/SIGTERM) and
   hands it to the CLI so Ctrl-C cancels in-flight work.
-- `cmd/` - cobra wiring. `run` resolves the repo source, builds a Profile, prints
-  the pre-run notice, drives the lifecycle, and prints the result. This package
-  never imports analyze.
+- `cmd/` - cobra wiring. `run` resolves the repo source, builds a Profile, runs
+  the static scan, prints the pre-run notice, drives the lifecycle, and prints
+  the result; `scan` resolves the repo and runs the same static scan alone,
+  with no container. This package DOES import `internal/analyze` (it is where
+  detection and containment are combined); see "Scan architecture" below.
 - `internal/sandbox/` - the sandbox engine: the `Runner` interface, the
   `DockerRunner` CLI implementation, the `Profile` type, the pure `createArgs`
   builder, the `Execute` orchestrator, and the optional `EgressInspector`
   (`egress.go`: monitor argv, sinkhole script, and the pure `parseEgress`
   parser). This package never imports analyze.
+- `internal/analyze/` - the scan engine: the `Analyzer` interface, the
+  `Report`/`Finding` types, the `Scan` orchestrator (walk once, run every
+  analyzer, correlate, dedupe, sort), and the manifest/entropy/regex analyzers
+  plus the cgo-gated AST seam. See "Scan architecture" below.
 
 ### The Runner interface
 
@@ -305,41 +312,141 @@ sandbox is only as strong as the runtime enforcing it on a shared host kernel:
 meguard raises the bar with cap-drop, no-new-privileges, read-only root,
 non-root user, and no network, but a kernel or root-daemon 0-day still reaches
 the host. Prefer a rootless runtime for genuinely hostile code. The `run`
-guarantee is independent of scan; scan is a separate, future, static-analysis
-feature.
+guarantee is independent of scan: scan is a read-only, host-side, advisory
+detector layered on top of containment, not a replacement for it. A bug in
+scan can never weaken the sandbox (`internal/sandbox` never imports
+`analyze`), and a scan failure never blocks the sandboxed run.
 
-## scan analyzer architecture (documented only; not implemented)
+## Scan architecture (implemented; see `internal/analyze`)
 
-scan will statically analyze a repo before it is ever run. Recorded here so the
-future implementation inherits the decisions.
+meguard is a container AND a detector: `meguard run` combines the sandbox with
+a static scan (advisory by default), and `meguard scan` runs the same
+detection alone, with no container and no Docker dependency at all.
 
-- One `Analyzer` interface; scan is composed of analyzers behind it.
-- Pure-Go analyzers (build with CGO_ENABLED=0):
-  - manifest: parse package.json, setup.py, pyproject.toml, and similar.
-  - entropy: flag base64/hex blobs and minified single-liners.
-  - regex: cheap first-pass pattern matching.
-- AST analyzer (tree-sitter) is the ONLY analyzer that needs cgo. It is isolated
-  behind build tags so it is the sole cgo dependency and degrades to a labeled
-  no-op when compiled out. Illustrative seam (not implemented):
+### The Analyzer interface and Scan orchestrator
 
-      //go:build cgo      -> newASTAnalyzer() returns treeSitterAnalyzer
-      //go:build !cgo     -> newASTAnalyzer() returns noopAnalyzer{reason:"AST needs a cgo build"}
+`Analyzer` (in `internal/analyze/analyze.go`) is a single interface:
 
-- Two build variants ship, same binary name and commands: pure static (no AST)
-  and cgo (full).
-- Graceful degradation: on the pure build, scan still runs manifest+entropy+regex
-  and the AST no-op MUST announce that it is disabled. A clean scan on the pure
-  build is NEVER presented as "AST found nothing"; the absence of AST is stated,
-  not silent.
+    Name() string
+    Analyze(files []ScannedFile) ([]Finding, error)
+
+`Scan(repoDir string) (Report, error)` walks the repo ONCE
+(`internal/analyze/walk.go`, `walkFiles`), reading only file bytes (never
+executing anything, matching the trust tier of `sandbox.DetectEcosystem`),
+then runs every analyzer against the shared `[]ScannedFile` result, then a
+correlation pass, dedupe, and a deterministic sort (severity, then file, then
+line).
+
+`Finding` carries an `Analyzer` name, a `Category` (used by the correlation
+pass), a `Severity` (Info/Low/Medium/High/Critical), the file and line, a
+message, a bounded snippet, and a dedupe `Count`. `Report` carries the
+findings, `FilesScanned`, `ASTEnabled`/`ASTDisabledReason` (see below), and
+non-fatal `Errors` (skipped files or a failed analyzer; `Scan` still returns a
+usable report when these are present).
+
+### The analyzers
+
+- `manifest.go`: flags `package.json` lifecycle scripts (`preinstall`,
+  `install`, `postinstall`, `prepare`, `preprepare`), scanning their script
+  string with the same pattern set used on source files. Python manifests
+  (`setup.py`, `pyproject.toml`, `setup.cfg`, `Pipfile`) are flagged at Info,
+  since arbitrary code can run at install time for that ecosystem regardless
+  of content.
+- `entropy.go`: computes per-line length and Shannon entropy for lines over
+  300 characters (`longLineThreshold`). This generalizes "a huge obfuscated
+  payload appended after legitimate code on the same physical line" (see
+  decision 0016 in docs/decisions.md) to any text file, without hardcoding a
+  filename. Excludes `dist/`, `build/`, `*.min.js`, `*.bundle.js` paths, since
+  checked-in minified bundles are normal on their own.
+- `regex.go`: cheap first-pass pattern matching across categories:
+  obfuscation (packer signature, `Function`-constructor eval,
+  `global`/`globalThis` require-stashing, the `_0xNNNN` obfuscator-tool
+  fingerprint), download-and-execute (curl/wget piped to a shell, Python shell
+  exec, Windows LOLBins scoped to `.ps1`/`.bat`/`.cmd`/`.vbs`), exfiltration
+  channels (Discord webhooks, Telegram bot API, raw-paste hosts),
+  credential/wallet file paths, persistence mechanisms, recon/fingerprinting,
+  and bulk `process.env` dumps. Two whole-file co-occurrence checks cover
+  plain-text exfiltration (not just obfuscated payloads): a network call plus
+  a secrets marker anywhere in one file, and a network call inside a
+  build/lint/tooling config file that has no legitimate reason to make one.
+
+### The AST analyzer: a labeled no-op behind cgo build tags
+
+The AST analyzer (tree-sitter) is the ONLY analyzer that needs cgo. It is
+isolated behind build tags (`internal/analyze/ast.go`, `ast_cgo.go`,
+`ast_nocgo.go`) so it is the sole cgo dependency and degrades to a labeled
+no-op when compiled out:
+
+    //go:build cgo      -> astDisabledReason: "not yet implemented for this build (grammar not wired)"
+    //go:build !cgo     -> astDisabledReason: "needs a cgo build"
+
+Both variants currently return a `noopAnalyzer`: wiring a real tree-sitter
+grammar is future work, out of scope for this slice. `Report.ASTEnabled` is
+always `false` today; `Report.ASTDisabledReason` is always set when it is
+false, so the absence is stated, never silent - a clean scan is NEVER
+presented as "AST found nothing".
+
+### False-positive controls
+
+Designed in alongside detection, not bolted on after:
+
+- Severity is capped by whether a file can actually execute: prose
+  (`.md`/`.mdx`/`.txt`/`.rst`/`.adoc`) is capped at Info, since a string
+  appearing in documentation is evidence of nothing (this repo's own
+  CLAUDE.md and docs/decisions.md discuss an example payload as prose, and
+  scan must not treat its own docs as a threat).
+- A correlation pass (`correlate` in `analyze.go`) escalates two or more
+  distinct WEAK categories co-located in one file (for example a
+  credential-path marker plus recon) into one additional High finding, so
+  individually common signals only matter combined. It only considers files
+  whose capped severity already rose above Info, which naturally excludes
+  prose files.
+- Dedupe (`dedupeFindings`) collapses repeats of the same (analyzer, category,
+  message, file) into one finding with an occurrence count, so one large or
+  repetitive file cannot flood the report.
+
+### Two build variants, same commands
+
+Two build variants ship: pure static (`CGO_ENABLED=0`, no AST) and cgo
+(`CGO_ENABLED=1 -tags cgo`, full). Same binary name and commands. Today no
+package in the repo actually imports `"C"`, so the cgo variant's AST analyzer
+is a no-op identical in behavior to the pure build's, only the disabled-reason
+string differs (see above); the two variants diverge once a real tree-sitter
+grammar is wired in.
+
+### How `run` and `scan` wire it in
+
+`cmd/scan.go` (`meguard scan <repo>`) resolves the repo the same safe way
+`run` does (`resolveRepo`: git clone only, no execution), calls
+`analyze.Scan(repoDir)`, prints the STATIC SCAN section, and exits non-zero if
+any High/Critical finding was reported. It touches no Docker/container code at
+all.
+
+`cmd/run.go` calls `analyze.Scan` on the resolved repo dir on the HOST,
+read-only, before any container work (same trust tier as
+`sandbox.DetectEcosystem`), and prints the same STATIC SCAN section between
+the pre-run notice and the SANDBOX OUTPUT section. Findings are ADVISORY: the
+sandboxed run proceeds regardless of what scan found (containment, not scan,
+is the safety net), unless `--fail-on-scan` is set, which exits non-zero
+after the run completes if any High/Critical finding was reported. `--no-scan`
+skips scanning entirely, restoring the pre-scan behavior exactly. If
+`analyze.Scan` itself errors (for example an unreadable repo dir), `run` logs
+the failure to stderr and continues with the sandboxed run rather than
+blocking it.
 
 ### Structural purity
 
-`run` and `sandbox` NEVER import `analyze` or any analyzer package. This is
+`internal/sandbox` NEVER imports `analyze` or any analyzer package. This is
 enforced by `TestSandboxDoesNotImportAnalyze` (in
 `internal/sandbox/import_guard_test.go`), which parses `go list -deps` output and
 fails if any forbidden import path appears in the sandbox package's transitive
 dependencies. The failure direction: the test passes today and fails the moment
 sandbox gains such a dependency.
+
+`cmd` (the CLI layer `run` and `scan` live in) DOES import `analyze`, by
+design: that is how detection and containment are combined in one command.
+What must stay independent is the sandbox's containment guarantee (a bug in
+scan must never be able to weaken it), not the CLI layer above it.
 
 ## Upgrade paths summary
 

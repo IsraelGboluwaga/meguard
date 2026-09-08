@@ -23,8 +23,13 @@ var forbiddenSubstrings = []string{
 // TestSandboxDoesNotImportAnalyze is the architecture guard test.
 //
 // WHAT IT ASSERTS: none of the transitive dependencies of internal/sandbox
-// belongs to scan, an analyzer, or tree-sitter. "run and sandbox NEVER import
-// analyze" is thereby enforced structurally rather than by convention.
+// belongs to scan, an analyzer, or tree-sitter. "internal/sandbox NEVER
+// imports analyze" is thereby enforced structurally rather than by
+// convention. This is narrower than "run never imports analyze": cmd (the
+// CLI package "run" and "scan" live in) DOES import internal/analyze, by
+// design, to combine detection with containment in "meguard run" and to run
+// detection alone in "meguard scan". What must stay independent is the
+// sandbox's containment guarantee, not the CLI layer above it.
 //
 // FAILURE DIRECTION: this test PASSES today (no analyze package exists yet and
 // sandbox depends only on the standard library). It will FAIL the moment
@@ -43,7 +48,7 @@ func TestSandboxDoesNotImportAnalyze(t *testing.T) {
 		for _, bad := range forbiddenSubstrings {
 			if strings.Contains(dep, bad) {
 				t.Errorf("sandbox has a forbidden transitive dependency %q (matched %q).\n"+
-					"run and sandbox MUST NOT import analyze or any analyzer; purity is structural.",
+					"internal/sandbox MUST NOT import analyze or any analyzer; purity is structural.",
 					dep, bad)
 			}
 		}

@@ -36,7 +36,14 @@ What to check every review:
   bind mount, and that the tar builder cannot write outside the container.
 - `internal/sandbox/execute.go` and `main.go`: confirm cleanup is deferred with a
   detached context and that signal handling cancels in-flight work.
-- Confirm `run` and `sandbox` do not import analyze (the guard test should pass).
+- Confirm `internal/sandbox` does not import `analyze` (the guard test should
+  pass; `cmd` importing `analyze` is expected and correct, since `run` and
+  `scan` both use it for detection).
+- `internal/analyze/*`: confirm every analyzer only reads file bytes (via
+  `walkFiles`/`os.ReadFile`) and never executes, shells out to, or writes repo
+  content; confirm `Scan` is called on the host, read-only, before any
+  container work, and that a scan failure never blocks or weakens the
+  sandboxed run in `cmd/run.go`.
 
 The trace you must be able to answer: with this code, what happens to a
 postinstall payload running
