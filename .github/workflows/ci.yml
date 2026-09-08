@@ -1,0 +1,58 @@
+name: ci
+
+# Runs the standard checks documented in CLAUDE.md on every push and pull
+# request against main: build, vet, test, gofmt, and the cgo-free guarantee
+# for the pure static build.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting (gofmt)
+        run: |
+          fmt_out="$(gofmt -l .)"
+          if [ -n "$fmt_out" ]; then
+            echo "The following files are not gofmt'd:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: Verify go.mod/go.sum
+        run: go mod verify
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Verify pure static build is cgo-free
+        run: |
+          CGO_ENABLED=0 go build -o meguard .
+          go version -m meguard | grep -q 'CGO_ENABLED=0' || {
+            echo "expected CGO_ENABLED=0 in the pure build"
+            exit 1
+          }
