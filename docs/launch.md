@@ -56,6 +56,17 @@ Verify the pure build is genuinely cgo-free:
 This produces the pure (CGO_ENABLED=0 by default on most setups) variant. For the
 full variant, build from source with `-tags cgo` as above.
 
+## Continuous integration
+
+Every push and pull request against `main` runs `.github/workflows/ci.yml` on
+`ubuntu-latest`: `gofmt -l` (fails on unformatted files), `go mod verify`,
+`go build ./...`, `go vet ./...`, `go test ./...`, then a dedicated step that
+rebuilds the pure static binary and checks `go version -m meguard` reports
+`CGO_ENABLED=0`, so the "run binary stays pure Go" rule (CLAUDE.md coding
+standards) is enforced on every change, not just caught later at release time.
+This is separate from, and does not trigger, the tag-triggered release
+workflow below.
+
 ## Release automation
 
 Releases are cut with GitHub Actions plus goreleaser. The config lives in
