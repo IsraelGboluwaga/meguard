@@ -14,13 +14,22 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   `--inspect-egress`, now removed). A plain `meguard run <repo>` logs every
   blocked outbound attempt. The new `--strict` flag drops to `--network none`
   (no network stack at all, no logs) for the hardest, fully-verified containment.
-  Egress is denied in both modes. Because inspected mode is EXPERIMENTAL (not yet
-  verified on a live Linux host) and needs a monitor image + NFLOG, the CLI
-  FALLS BACK to `--network none` with a printed warning if the monitor cannot
-  start (`sandbox.ErrMonitorUnavailable`), so `meguard run` keeps working
-  everywhere and never silently loses containment. The library zero-value
+  Egress is denied in both modes. Because inspected mode needs a monitor image +
+  NFLOG, the CLI FALLS BACK to `--network none` with a printed warning if the
+  monitor cannot start (`sandbox.ErrMonitorUnavailable`), so `meguard run` keeps
+  working everywhere and never silently loses containment. The library zero-value
   Profile still selects `--network none`, so invariant 3 is unchanged; CLAUDE.md
   invariant 4 is updated to "egress always denied, in one of two modes".
+  - VERIFIED on Docker/OrbStack (real Linux kernel): hardcoded-IP SYNs logged and
+    dropped, no leak to a sibling container on the bridge subnet, DNS captured by
+    name, IPv6 sealed, clean run reports "0 attempts", monitor-unavailable falls
+    back, no container leaks. Rootless runtimes not yet checked.
+  - Fixes found during that verification: (1) Execute now waits ~1.2s
+    (`monitorFlushDelay`) for tcpdump to flush before reading the monitor log, so
+    a single fast packet (one DNS query) is not missed by a read race; (2) a
+    clean inspected run (zero captured events) is now reported as "0 outbound
+    attempts" instead of being misreported as "monitor output could not be read"
+    - the read-failure path is now a distinct `Result.EgressReadFailed` signal.
 
 ### Added
 

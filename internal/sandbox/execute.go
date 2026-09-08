@@ -28,9 +28,16 @@ type Result struct {
 
 	// Egress is the deduplicated list of outbound connection attempts the
 	// monitor observed and dropped. It is only populated when EgressInspected is
-	// true. An empty slice with EgressInspected true means the repo attempted no
-	// egress (a clean result), which is distinct from egress not being watched.
+	// true. Empty with EgressInspected true and EgressReadFailed false means the
+	// repo attempted no egress (a clean result).
 	Egress []EgressEvent
+
+	// EgressReadFailed is true when egress was inspected but the monitor's
+	// capture could not be read (so Egress is unknown, NOT known-empty). This is
+	// distinct from a clean run: containment still held either way. It is the
+	// only signal for "could not read", so zero attempts is never misreported as
+	// a read failure.
+	EgressReadFailed bool
 }
 
 // ExecuteOptions configures a single Execute run.
@@ -118,17 +125,39 @@ func Execute(ctx context.Context, r Runner, opts ExecuteOptions) (result Result,
 	result = Result{InstallExitCode: code}
 	if p.InspectEgress {
 		result.EgressInspected = true
+		// Give the monitor's tcpdump a moment to flush its last captured lines to
+		// the container log before we read them. Without this, a single fast
+		// packet (e.g. one DNS query from an install that exits immediately) can
+		// race the read and be missed even though it was captured and dropped.
+		settle(ctx, monitorFlushDelay)
 		// Best-effort: a monitor that fails to report must not fail the run, and
-		// the containment guarantee does not depend on the report. Egress stays
-		// nil (reported as "unable to read" by the caller) on error.
+		// the containment guarantee does not depend on the report. On a read
+		// error EgressReadFailed is set so the caller says "could not read"
+		// rather than misreporting zero attempts.
 		events, cErr := inspector.CollectEgress(ctx, monitorName)
 		if cErr != nil {
 			fmt.Fprintf(opts.Stderr, "meguard: could not read egress monitor: %v\n", cErr)
+			result.EgressReadFailed = true
 		} else {
 			result.Egress = events
 		}
 	}
 	return result, nil
+}
+
+// monitorFlushDelay is how long Execute waits after the install command exits
+// for the monitor's line-buffered tcpdump to flush its last captured lines to
+// the container log before CollectEgress reads them.
+const monitorFlushDelay = 1200 * time.Millisecond
+
+// settle sleeps for d, but returns early if ctx is cancelled (Ctrl-C).
+func settle(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
 }
 
 // removeDetached force-removes a container using a detached, time-bounded

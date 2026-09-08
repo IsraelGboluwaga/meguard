@@ -186,6 +186,14 @@ here.
   makes the CLI fall back to `--network none` with a warning
   (`ErrMonitorUnavailable`), never to open egress and never silently. CLAUDE.md
   invariant 4 is rewritten from "hardcoded `--network none`" to "egress always
-  denied, in one of two modes". The live-verification pass on a Linux host is
-  still outstanding; until it lands, inspected mode stays labeled experimental,
-  and `--strict` is the fully verified mode.
+  denied, in one of two modes".
+- Update (live-verified): the seal was verified on Docker/OrbStack (a real Linux
+  kernel) - hardcoded-IP SYNs logged+dropped, no leak to a sibling container on
+  the bridge subnet (proving the OUTPUT DROP policy seals on-link routes), DNS
+  captured by name, IPv6 sealed, clean run reports zero attempts, fallback works,
+  no container leaks. Two bugs found and fixed during verification: a read race
+  (fixed with a ~1.2s flush wait before reading the monitor log) and a
+  nil-vs-empty misreport of a clean run as "could not be read" (fixed with a
+  distinct `Result.EgressReadFailed`). Not yet checked: rootless runtimes
+  (Podman) and kernels without `nfnetlink_log`, where the monitor fails to start
+  and the CLI falls back to `--network none`.

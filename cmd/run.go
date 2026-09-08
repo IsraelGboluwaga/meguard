@@ -63,7 +63,7 @@ unprivileged user rather than host root.`,
 	// (egress dropped AND logged via a monitor sidecar) so you can see what a repo
 	// tried to reach. --strict drops to the fully verified --network none (no
 	// network stack at all, no logs) for the hardest containment.
-	cmd.Flags().BoolVar(&strict, "strict", false, "strictest containment: --network none, no network stack at all and no egress logs (default is to log blocked egress)")
+	cmd.Flags().BoolVar(&strict, "strict", false, "strictest containment: --network none, no network stack at all and no egress logs (default logs blocked egress; verified on Docker/OrbStack, needs a monitor image with ip/iptables/tcpdump+NFLOG)")
 	cmd.Flags().StringVar(&monitorImage, "monitor-image", "", "image for the egress monitor sidecar (default nicolaka/netshoot; must provide ip, iptables, ip6tables, tcpdump+NFLOG)")
 	return cmd
 }
@@ -219,7 +219,7 @@ func printPreRunNotice(w io.Writer, source, runtimeBin string, p sandbox.Profile
 	fmt.Fprintln(w, "  - NO host $HOME and NO repo bind mounts (repo is copied into a container tmpfs)")
 	if p.InspectEgress {
 		fmt.Fprintf(w, "  - network INSPECTED via monitor sidecar (%s): the netns is sealed fail-closed (OUTPUT DROP), every outbound attempt is logged then dropped\n", p.MonitorImageOrDefault())
-		fmt.Fprintln(w, "    [experimental] egress inspection is not yet verified on a live Linux Docker host; pass --strict for the fully verified --network none mode. If the monitor cannot start, meguard falls back to --network none automatically.")
+		fmt.Fprintln(w, "    verified on Docker/OrbStack (Linux); rootless runtimes not yet checked. If the monitor cannot start, meguard falls back to --network none automatically. Pass --strict for the no-stack --network none mode.")
 	} else {
 		fmt.Fprintln(w, "  - network DENIED (--strict: --network none, no egress, no logs)")
 	}
@@ -246,9 +246,10 @@ func printEgress(w io.Writer, r sandbox.Result) {
 		fmt.Fprintln(w, "egress: not inspected (--network none; egress is fully denied but not logged)")
 		return
 	}
-	if r.Egress == nil {
-		// EgressInspected but no list: the monitor could not be read. The
-		// containment guarantee still holds; only the report is missing.
+	if r.EgressReadFailed {
+		// Inspected, but the monitor's capture could not be read. Containment
+		// still held; only the report is missing. This is NOT the same as a
+		// clean run, so it must never be conflated with "0 attempts".
 		fmt.Fprintln(w, "egress: inspected, but the monitor output could not be read (see stderr); egress was still blocked")
 		return
 	}

@@ -189,15 +189,23 @@ silence; an unreadable monitor says so and never claims zero. The monitor image
 is `nicolaka/netshoot` by default and overridable with `--monitor-image`; it must
 provide `ip` (iproute2), `iptables`, and `tcpdump`.
 
-LIVE-VERIFICATION NOTE: the Go orchestration, argv, output, `parseEgress`, and
-the fail-closed ordering are unit tested, and the seal is now fail-closed by
-construction (OUTPUT DROP policy for v4+v6, verified before readiness, no
-`|| true` on any critical rule). The in-container netns/iptables/NFLOG behavior
-must still be verified once on a real Linux Docker host: NFLOG needs the
-`nfnetlink_log` kernel module, and `tcpdump` must support `-i nflog:<group>`.
-Until that pass lands, inspected mode is documented as experimental. It is the
-CLI default (for visibility), but the library zero-value Profile still selects
-`--network none`, and `--strict` selects the verified no-stack mode directly.
+LIVE-VERIFICATION: the Go orchestration, argv, output, `parseEgress`, and the
+fail-closed ordering are unit tested, and the in-container netns/iptables/NFLOG
+seal has been verified on Docker/OrbStack (a real Linux kernel). The passing
+checklist: a hardcoded-IP SYN is logged (`BLOCKED tcp <ip>:<port>`) and the fetch
+times out; a connection to a sibling container on the docker bridge subnet does
+NOT leak (proving the OUTPUT DROP policy seals on-link routes, not just the
+default route); DNS is captured by name (`BLOCKED dns <name>`); IPv6 is blocked;
+a no-call run reports "0 outbound attempts"; the monitor-unavailable path falls
+back to `--network none`; and no containers leak. Not yet checked: rootless
+runtimes (Podman) and non-`nfnetlink_log` kernels - on those the monitor fails to
+start and the CLI falls back to `--network none`. The library zero-value Profile
+still selects `--network none`; `--strict` selects the no-stack mode directly.
+
+One timing detail from that verification: Execute waits `monitorFlushDelay`
+(~1.2s) after the install command exits before reading the monitor log, so a
+single fast packet (e.g. one DNS query from an install that exits immediately)
+does not race tcpdump's line-buffered flush and get missed.
 
 Fallback: because inspected mode is experimental and needs a monitor image plus
 NFLOG, `Execute` wraps any monitor-start failure in `ErrMonitorUnavailable`. In

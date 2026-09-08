@@ -122,14 +122,16 @@ needs, and `cap-drop ALL` means the sandbox cannot alter the seal.
 network stack at all, no monitor, no egress logs. Use it for the hardest
 containment or in environments where the monitor image / NFLOG is unavailable.
 
-**Egress logging is EXPERIMENTAL and is now the default.** The Go orchestration,
-the fail-closed ordering, and the parser are unit tested, but the in-container
-netns/iptables/NFLOG mechanics have not yet been verified on a live Linux Docker
-host (NFLOG needs the `nfnetlink_log` kernel module). To keep `meguard run`
-working everywhere in the meantime, **if the monitor cannot start meguard
-automatically falls back to `--network none`** with a printed warning - egress
-stays fully denied, you just lose the logs for that run. Pass `--strict` to skip
-the monitor entirely and get the verified mode directly.
+**Egress logging is now the default, and is verified on Docker/OrbStack (a real
+Linux kernel).** The live checklist passed: TCP connection attempts to hardcoded
+IPs are logged and dropped, connections to a sibling container on the docker
+bridge subnet do not leak, DNS lookups are captured by name, IPv6 is sealed,
+cleanup leaves nothing behind, and a repo that makes no calls reports "0 outbound
+attempts". Rootless runtimes (e.g. Podman) and other kernels are not yet checked.
+To keep `meguard run` working everywhere regardless, **if the monitor cannot
+start meguard automatically falls back to `--network none`** with a printed
+warning - egress stays fully denied, you just lose the logs for that run. Pass
+`--strict` to skip the monitor entirely.
 
 ### Choosing a runtime (the trust boundary)
 

@@ -155,13 +155,28 @@ func TestPrintResultEgressCleanIsExplicit(t *testing.T) {
 // repo made zero calls.
 func TestPrintResultEgressUnreadable(t *testing.T) {
 	var buf bytes.Buffer
-	printResult(&buf, sandbox.Result{EgressInspected: true, Egress: nil})
+	printResult(&buf, sandbox.Result{EgressInspected: true, EgressReadFailed: true, Egress: nil})
 	out := buf.String()
 	if !strings.Contains(out, "could not be read") {
 		t.Errorf("unreadable monitor must be surfaced\n  got:\n%s", out)
 	}
 	if strings.Contains(out, "0 outbound attempts") {
 		t.Errorf("must not claim zero attempts when monitor was unreadable\n  got:\n%s", out)
+	}
+}
+
+// A clean inspected run (nil/empty Egress, read did NOT fail) must report zero
+// attempts, never "could not be read". This is the nil-vs-empty regression the
+// live run surfaced.
+func TestPrintResultEgressCleanNilIsZeroNotUnreadable(t *testing.T) {
+	var buf bytes.Buffer
+	printResult(&buf, sandbox.Result{EgressInspected: true, EgressReadFailed: false, Egress: nil})
+	out := buf.String()
+	if !strings.Contains(out, "0 outbound attempts observed") {
+		t.Errorf("a clean run with nil Egress must report zero attempts\n  got:\n%s", out)
+	}
+	if strings.Contains(out, "could not be read") {
+		t.Errorf("a successful read of zero events must not say 'could not be read'\n  got:\n%s", out)
 	}
 }
 
