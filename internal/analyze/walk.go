@@ -15,8 +15,20 @@ import (
 const maxScanFileSize = 5 << 20 // 5 MiB
 
 // skipDirNames are directories walkFiles never descends into: version
-// control metadata and third-party dependency trees. None of these hold
-// source an attacker would hand-edit; they only add noise and time.
+// control metadata, third-party dependency trees, and inert tool caches.
+//
+// The dependency trees (node_modules, vendor, venv/.venv/env, .tox, .eggs)
+// hold installed third-party package code, which CAN carry a malicious
+// payload -- but the same is true of node_modules, which has always been
+// skipped here, so this is a consistent, deliberate tradeoff, not a hole.
+// It rests on the tool's design: containment (the sandboxed run), not the
+// advisory scan, is the safety net for whatever a dependency ships, and in
+// the normal clone-then-scan flow these trees are usually gitignored and
+// created at install time inside the container, not committed. The caches
+// (__pycache__, .mypy_cache, .pytest_cache) are inert generated data
+// (JSON/text), not an execution vector; skipping them is pure noise and
+// time reduction. Python .egg-info metadata dirs are a glob, not a fixed
+// name, so they are matched separately (see isGeneratedMetadataDir).
 //
 // dist/ and build/ are DELIBERATELY NOT here: an attacker could plant a
 // payload disguised as a build artifact, so those directories are still
@@ -26,13 +38,27 @@ const maxScanFileSize = 5 << 20 // 5 MiB
 // its use in entropy.go), because minification alone is normal there and not
 // evidence of anything by itself.
 var skipDirNames = map[string]bool{
-	".git":         true,
-	"node_modules": true,
-	"vendor":       true,
-	".next":        true,
-	"__pycache__":  true,
-	"venv":         true,
-	".venv":        true,
+	".git":          true,
+	"node_modules":  true,
+	"vendor":        true,
+	".next":         true,
+	"__pycache__":   true,
+	"venv":          true,
+	".venv":         true,
+	"env":           true,
+	".tox":          true,
+	".eggs":         true,
+	".mypy_cache":   true,
+	".pytest_cache": true,
+}
+
+// isGeneratedMetadataDir reports whether name is a Python packaging metadata
+// directory (foo.egg-info / foo.dist-info). These are generated, inert text
+// metadata (PKG-INFO, entry_points.txt, RECORD, ...), not hand-edited source,
+// so they only add noise. Matched by suffix because the name is a glob keyed
+// on the package name, which skipDirNames (an exact-match map) cannot express.
+func isGeneratedMetadataDir(name string) bool {
+	return strings.HasSuffix(name, ".egg-info") || strings.HasSuffix(name, ".dist-info")
 }
 
 // ScannedFile is one text file read during a walk, ready for analyzers to
@@ -78,7 +104,7 @@ func walkFiles(repoDir string) ([]ScannedFile, []string, error) {
 			return nil
 		}
 		if d.IsDir() {
-			if path != repoDir && skipDirNames[d.Name()] {
+			if path != repoDir && (skipDirNames[d.Name()] || isGeneratedMetadataDir(d.Name())) {
 				return filepath.SkipDir
 			}
 			return nil

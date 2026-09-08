@@ -345,3 +345,64 @@ here.
   its other long lines too, not just the script, is the conservative
   choice. New tests: `TestEntropyAnalyzerExcludesSVGPathData`,
   `TestEntropyAnalyzerScansSVGWithScriptTag`.
+
+## 0019 - Progress spinner on stderr; drop the compact command echo
+
+- Decision: on the compact (non--verbose) path, animate a single in-place
+  spinner line on stderr while the slow, otherwise-silent stages run (the
+  static scan, and, for `run`, the in-container install), and remove the
+  redundant `meguard run <source>` header line (compact `scan`'s header is
+  reduced to the fixed `meguard scan (no container; read-only)` mode line,
+  dropping the repeated source path). The spinner lives in `cmd/spinner.go`
+  and is a no-op when stderr is not a terminal.
+- Alternatives: a full progress bar or per-stage timing (rejected: the stages
+  are coarse and their durations unknown up front - a spinner conveys
+  "working" without implying a measurable percentage); print static "scanning
+  ..."/"installing ..." lines with no animation (rejected: on a multi-second
+  install with no output they still read as frozen; an animation is the signal
+  that the process is alive); write the spinner to stdout (rejected: stdout
+  carries the machine-relevant report, and a spinner's carriage returns would
+  corrupt it when piped - stderr is the correct channel for progress chrome);
+  add `golang.org/x/term` for terminal detection (rejected: the run binary
+  must stay cgo-free and dependency-light, and `os.File.Stat`'s
+  `ModeCharDevice` check is sufficient on the supported platforms); keep
+  echoing the invoked command (rejected: the user just typed it, so it is
+  pure noise in the compact view).
+- Reason: the compact default made the tool look frozen during the exact
+  stages it exists to run, because they print nothing until they finish;
+  the freeze was the top piece of feedback. Confining the animation to stderr
+  and making it inert on non-terminals keeps piped output byte-for-byte clean
+  and the report on stdout untouched, so this is presentation only - detection,
+  containment, exit codes, and every flag behave identically. Terminal
+  detection via `os.File.Stat` avoids any new dependency and keeps the run
+  binary cgo-free. New tests: `TestSpinnerNoOpOnNonTerminal`,
+  `TestNilSpinnerIsSafe`, `TestSpinnerLifecycleIsSafe`.
+
+## 0020 - Skip Python dependency trees and tool caches in the scan walk
+
+- Decision: extend `skipDirNames` (`internal/analyze/walk.go`) to skip the
+  Python dependency trees `env`, `.tox`, `.eggs` and the inert tool caches
+  `.mypy_cache`, `.pytest_cache`, and add `isGeneratedMetadataDir` to also skip
+  glob-named packaging metadata dirs (`*.egg-info`, `*.dist-info`), which an
+  exact-match map cannot express. This joins the pre-existing
+  `node_modules`/`vendor`/`.next`/`__pycache__`/`venv`/`.venv` skips.
+- Alternatives: leave the Python trees walked (rejected: inconsistent with
+  `node_modules`, which was always skipped, and floods the report with a
+  dependency's own legitimate long/obfuscated-looking lines); go the other way
+  and START scanning dependency trees, including `node_modules` (rejected: a
+  half-measure that scans some dep code and not others is worse than a
+  consistent rule, and it does not add real safety because containment already
+  owns dependency risk - the scan is advisory); match `*.egg-info` by adding a
+  synthetic key to the exact-match map (rejected: the name is keyed on the
+  package name, so it must be a suffix test, not an exact match).
+- Reason: these directories hold installed third-party package code or
+  generated caches, not source an attacker hand-edits, and skipping them is
+  consistent with the long-standing `node_modules` decision. The dependency
+  code CAN carry a payload, but the safety property is containment: whatever a
+  dependency ships runs inside the locked-down sandbox during install/import,
+  and in the normal clone-then-scan flow these trees are gitignored and created
+  at install time in the container, not committed - so a checked-in trojaned
+  venv is the same residual exposure `node_modules` already has, not a new one.
+  `dist/`/`build/` stay walked (invariant unchanged): an attacker could disguise
+  a payload as a build artifact, so only the entropy heuristic skips those.
+  New tests: extended `TestWalkFilesSkipsNoiseDirs`, `TestIsGeneratedMetadataDir`.

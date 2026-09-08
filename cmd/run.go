@@ -113,6 +113,15 @@ type runOptions struct {
 func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) error {
 	runner := sandbox.DockerRunner{Binary: o.runtimeBin}
 
+	// In compact mode the slow stages (static scan, and the in-container
+	// install) print nothing until they finish, which looks frozen. A spinner
+	// on stderr fills that gap; it is inert on a non-terminal stderr and unused
+	// in verbose mode, which streams its own live output instead.
+	var sp *spinner
+	if !o.verbose {
+		sp = newSpinner(stderr)
+	}
+
 	// Fail fast with actionable guidance if no runtime is reachable, before we
 	// clone anything or print a pre-run notice for a run that cannot start.
 	if err := runner.Preflight(ctx); err != nil {
@@ -157,8 +166,6 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 
 	if o.verbose {
 		printPreRunNotice(stdout, o.source, o.runtimeBin, ecosystem, profile.Normalize())
-	} else {
-		fmt.Fprintf(stdout, "meguard run %s\n\n", o.source)
 	}
 
 	// Static scan runs on the host, read-only, before any container work:
@@ -169,7 +176,9 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 	var scanReport analyze.Report
 	if !o.noScan {
 		var scanErr error
+		sp.start("scanning repo for hidden code")
 		scanReport, scanErr = analyze.Scan(repoDir)
+		sp.stop()
 		if scanErr != nil {
 			// A scan failure (e.g. an unreadable repo dir) must not block the
 			// sandboxed run: detection is additive, containment is the
@@ -196,6 +205,7 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 		instStdout, instStderr = &installLog, &installLog
 	}
 
+	sp.start(fmt.Sprintf("running %s in locked-down sandbox (%s)", strings.Join(profile.InstallCmd, " "), profile.Image))
 	result, err := sandbox.Execute(ctx, runner, sandbox.ExecuteOptions{
 		RepoDir: repoDir,
 		Profile: profile,
@@ -215,9 +225,11 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 	// logs, and the fallback is stated, never silent. --strict skips inspection
 	// entirely, so there is nothing to fall back from.
 	if err != nil && profile.InspectEgress && errors.Is(err, sandbox.ErrMonitorUnavailable) {
+		sp.stop()
 		fmt.Fprintf(stderr, "meguard: egress inspection unavailable (%v)\n", err)
 		fmt.Fprintln(stderr, "meguard: falling back to --network none (egress still fully denied, but no egress logs). Fix the monitor image/runtime for logs, or pass --strict to require this mode.")
 		profile.InspectEgress = false
+		sp.start(fmt.Sprintf("running %s in locked-down sandbox (%s)", strings.Join(profile.InstallCmd, " "), profile.Image))
 		result, err = sandbox.Execute(ctx, runner, sandbox.ExecuteOptions{
 			RepoDir: repoDir,
 			Profile: profile,
@@ -226,6 +238,7 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 			Diag:    stderr,
 		})
 	}
+	sp.stop()
 	if err != nil {
 		if !o.verbose && installLog.Len() > 0 {
 			fmt.Fprintln(stderr, "meguard: install log:")

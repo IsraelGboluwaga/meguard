@@ -120,13 +120,16 @@ Examples:
     # Full detail: protections rationale, every finding, and the raw install log
     meguard run ./suspicious-repo -v
 
-By default `run` prints a COMPACT report: a one-line header, a per-stage
-status checklist (`sandbox`, `install`, `scan`, `egress`, `secrets`, using
-✓/!/✗ glyphs), a "Top findings" block listing every High/Critical scan
-finding individually (capped at 8, with everything else rolled into one
-"... N more" line), and a single free-text `RESULT: ...` sentence. The raw
-install log is captured but not printed unless the install exited non-zero.
-For example, against a repo with a malicious `postinstall` hook:
+By default `run` prints a COMPACT report: a per-stage status checklist
+(`sandbox`, `install`, `scan`, `egress`, `secrets`, using ✓/!/✗ glyphs), a
+"Top findings" block listing every High/Critical scan finding individually
+(capped at 8, with everything else rolled into one "... N more" line), and a
+single free-text `RESULT: ...` sentence. The raw install log is captured but
+not printed unless the install exited non-zero. While the slow stages run
+(the static scan and the in-container install) a spinner animates on stderr
+so the tool does not look frozen; it disappears when stderr is not a terminal,
+so piped output stays clean. For example, against a repo with a malicious
+`postinstall` hook:
 
     meguard run <repo>
 
@@ -265,11 +268,12 @@ Examples:
     # Full detail: every finding listed individually with its snippet
     meguard scan ./suspicious-repo -v
 
-By default `scan` prints a compact report: a one-line header, a status line,
-and a "Top findings" block (the same shape `run` prints; see
-[Usage](#usage) above), for example:
+By default `scan` prints a compact report: a one-line mode header, a status
+line, and a "Top findings" block (the same shape `run` prints; see
+[Usage](#usage) above). A spinner animates on stderr while the walk runs (and
+disappears on non-terminal output). For example:
 
-    meguard scan <repo> (no container; read-only)
+    meguard scan (no container; read-only)
 
     ! scan       8 finding(s) (2 high, 6 medium) across 8 files
 

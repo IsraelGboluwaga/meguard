@@ -8,7 +8,33 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ## [Unreleased]
 
+### Added
+
+- Progress spinner on the compact (non--verbose) `meguard run` and
+  `meguard scan` paths (`cmd/spinner.go`). The slow, previously silent stages
+  (the static scan, and the in-container install) now animate a single
+  in-place line on stderr so the tool no longer looks frozen while it works.
+  It is inert when stderr is not a terminal (piped or redirected output stays
+  clean) and unused in `-v`/`--verbose` mode, which streams its own live
+  output. Frames are plain ASCII; the run binary stays cgo-free (terminal
+  detection uses `os.File.Stat`, no external dependency).
+
 ### Changed
+
+- Static scan now skips more Python dependency trees and inert tool caches
+  (`skipDirNames` in `internal/analyze/walk.go`): added `env`, `.tox`,
+  `.eggs`, `.mypy_cache`, `.pytest_cache`, and glob-named packaging metadata
+  dirs `*.egg-info`/`*.dist-info` (via the new `isGeneratedMetadataDir`), on
+  top of the existing `node_modules`/`vendor`/`.next`/`__pycache__`/`venv`/
+  `.venv`. The dependency trees hold installed package code that CAN carry a
+  payload, but so does `node_modules`, which was always skipped: containment
+  (the sandboxed run), not the advisory scan, is the safety net, and these
+  trees are normally gitignored and created at install time in the container.
+  `dist/`/`build/` remain walked. Cuts scan noise and time on Python repos.
+- Compact `meguard run` no longer echoes the invoked `meguard run <source>`
+  command back as a header line (the user already typed it). Compact
+  `meguard scan` likewise drops the repeated source path; its header is now
+  just `meguard scan (no container; read-only)`. Verbose output is unchanged.
 
 - `meguard run` and `meguard scan` default output is now COMPACT instead of
   the previous full detail: a one-line header, a per-stage status checklist
