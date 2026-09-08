@@ -15,10 +15,12 @@ closes, the threat model, and the scan analyzer architecture (implemented in
 - `main.go` - entry point. Builds a signal-aware context (SIGINT/SIGTERM) and
   hands it to the CLI so Ctrl-C cancels in-flight work.
 - `cmd/` - cobra wiring. `run` resolves the repo source, builds a Profile, runs
-  the static scan, prints the pre-run notice, drives the lifecycle, and prints
-  the result; `scan` resolves the repo and runs the same static scan alone,
-  with no container. This package DOES import `internal/analyze` (it is where
-  detection and containment are combined); see "Scan architecture" below.
+  the static scan, drives the lifecycle, and prints a report; `scan` resolves
+  the repo and runs the same static scan alone, with no container. Both
+  default to a compact report and take `-v`/`--verbose` for the full one (see
+  "Output verbosity" below). This package DOES import `internal/analyze` (it
+  is where detection and containment are combined); see "Scan architecture"
+  below.
 - `internal/sandbox/` - the sandbox engine: the `Runner` interface, the
   `DockerRunner` CLI implementation, the `Profile` type, the pure `createArgs`
   builder, the `Execute` orchestrator, and the optional `EgressInspector`
@@ -357,7 +359,8 @@ usable report when these are present).
   payload appended after legitimate code on the same physical line" (see
   decision 0016 in docs/decisions.md) to any text file, without hardcoding a
   filename. Excludes `dist/`, `build/`, `*.min.js`, `*.bundle.js` paths, since
-  checked-in minified bundles are normal on their own.
+  checked-in minified bundles are normal on their own, and a `.svg` file that
+  carries no `<script>` tag (see "False-positive controls" below).
 - `regex.go`: cheap first-pass pattern matching across categories:
   obfuscation (packer signature, `Function`-constructor eval,
   `global`/`globalThis` require-stashing, the `_0xNNNN` obfuscator-tool
@@ -404,6 +407,20 @@ Designed in alongside detection, not bolted on after:
 - Dedupe (`dedupeFindings`) collapses repeats of the same (analyzer, category,
   message, file) into one finding with an occurrence count, so one large or
   repetitive file cannot flood the report.
+- `entropy.go` excludes `.svg` files (`isSVGPath` in `walk.go`, alongside the
+  existing `isMinifiedOrVendorPath`), but ONLY when the file has no `<script>`
+  tag (`svgScriptTagRe` in `entropy.go`): SVG `path`/`viewBox` attributes are
+  legitimately one long line of numeric coordinate data, which reads as long
+  and moderately-high-entropy without being an obfuscated payload, but an SVG
+  carrying a `<script>` tag is executable, not static graphics, so it loses
+  the exclusion for the whole file (a script-carrying SVG is unusual enough
+  on its own to warrant scrutinizing its other long lines too). Either way
+  the exclusion is entropy-only and does NOT treat SVG as inert: `.svg` is
+  deliberately absent from `proseExtensions`, so `regex.go`'s signature
+  checks (script tags, eval, obfuscator fingerprints, exfil URLs, etc.) keep
+  scanning ALL `.svg` content unfiltered and at full severity regardless,
+  since SVG can also execute via `onload=`/`onclick=` handlers, not just
+  `<script>` - a real XSS vector.
 
 ### Two build variants, same commands
 
@@ -418,14 +435,16 @@ grammar is wired in.
 
 `cmd/scan.go` (`meguard scan <repo>`) resolves the repo the same safe way
 `run` does (`resolveRepo`: git clone only, no execution), calls
-`analyze.Scan(repoDir)`, prints the STATIC SCAN section, and exits non-zero if
-any High/Critical finding was reported. It touches no Docker/container code at
-all.
+`analyze.Scan(repoDir)`, prints a report (compact by default, the full STATIC
+SCAN section under `-v`/`--verbose`; see "Output verbosity" below), and exits
+non-zero if any High/Critical finding was reported. It touches no
+Docker/container code at all.
 
 `cmd/run.go` calls `analyze.Scan` on the resolved repo dir on the HOST,
 read-only, before any container work (same trust tier as
-`sandbox.DetectEcosystem`), and prints the same STATIC SCAN section between
-the pre-run notice and the SANDBOX OUTPUT section. Findings are ADVISORY: the
+`sandbox.DetectEcosystem`), and folds the findings into the same report
+(compact by default; the full STATIC SCAN section, between the pre-run
+notice and the SANDBOX OUTPUT section, under `-v`). Findings are ADVISORY: the
 sandboxed run proceeds regardless of what scan found (containment, not scan,
 is the safety net), unless `--fail-on-scan` is set, which exits non-zero
 after the run completes if any High/Critical finding was reported. `--no-scan`
@@ -447,6 +466,32 @@ sandbox gains such a dependency.
 design: that is how detection and containment are combined in one command.
 What must stay independent is the sandbox's containment guarantee (a bug in
 scan must never be able to weaken it), not the CLI layer above it.
+
+### Output verbosity
+
+Both `run` and `scan` default to a COMPACT report: a one-line header, a
+per-stage status checklist (`✓`/`!`/`✗` glyphs), only the High/Critical
+findings listed individually in a "Top findings" block (capped at
+`maxTopFindings` = 8, with everything else rolled into one "... N more" line
+grouped by analyzer, plus a "mostly `<dir>`/*" hint when one directory
+accounts for most of the rest), and a single free-text `RESULT: ...`
+sentence. The raw install log (`run` only) is captured but not printed unless
+the install exited non-zero, in which case it is dumped under an `INSTALL LOG
+(install exited non-zero)` section.
+
+`-v`/`--verbose` (both commands) restores the exact previous, full-detail
+report: the `meguard: preparing locked-down sandbox` header with the full
+active-protections prose (`run` only), every finding listed individually with
+its snippet under `STATIC SCAN`, and the streamed `SANDBOX OUTPUT` section
+(`run` only) followed by the full `RESULT` section.
+
+This is presentation only: detection, containment, exit codes,
+`--fail-on-scan`, and `--no-scan` behave identically in both modes. Compact
+rendering lives in `printCompactReport`/`printCompactEgressLine`/
+`summarizeCompactResult` (`cmd/run.go`) and `printCompactScanSection`/
+`printTopFindings`/`restHint` (`cmd/scan.go`); the pre-existing full-detail
+rendering (`printPreRunNotice`/`printScanSection`/`printResult`) is unchanged
+and now only runs under `-v`.
 
 ## Upgrade paths summary
 

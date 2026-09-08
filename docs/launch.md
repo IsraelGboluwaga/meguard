@@ -143,18 +143,24 @@ release version is injected into the binary via ldflags and shown by
     # End to end against a known-safe repo, with a compatible runtime running:
     meguard run https://github.com/octocat/Hello-World.git
 
-Expected for `run`: a pre-run notice listing the active protections, a STATIC
-SCAN section (skip with `--no-scan`), streamed sandbox output under a labeled
-section, and a result with the install exit code and the "0 host secrets
-exposed (by construction)" line. Note that Hello-World has no package.json, so
-`npm install` reports a non-zero install exit code; that is the sandboxed
+Expected for `run` (default, compact): a one-line header, then a status
+checklist (`sandbox`, `install`, `scan`, `egress`, `secrets`), a "Top
+findings" block if scan found anything High/Critical, and a single `RESULT:
+...` sentence. The raw install log is only shown if the install exited
+non-zero. Note that Hello-World has no package.json, so `npm install` reports
+a non-zero install exit code (and its log is printed); that is the sandboxed
 command's outcome, not a meguard failure. Point `run` at a repo with a
-package.json (or pass `--cmd`) to see a zero install exit code.
+package.json (or pass `--cmd`) to see a zero install exit code. Pass
+`-v`/`--verbose` for the full report: a pre-run notice listing the active
+protections, a STATIC SCAN section (skip scanning entirely with `--no-scan`),
+streamed sandbox output under a labeled section, and a result with the
+install exit code and the "0 host secrets exposed (by construction)" line.
 
-Expected for `scan`: a STATIC SCAN section with a files-scanned count, the
-AST-disabled line (labeled, never silent), and either "findings: none" or a
-list of findings; `scan` exits non-zero only if any High/Critical finding was
-reported.
+Expected for `scan` (default, compact): a one-line header, a status line, and
+a "Top findings" block; `scan` exits non-zero only if any High/Critical
+finding was reported. Pass `-v`/`--verbose` for a STATIC SCAN section with a
+files-scanned count, the AST-disabled line (labeled, never silent), and
+either "findings: none" or a list of every finding.
 
 If meguard reports it cannot reach the runtime, confirm your Docker-compatible
 runtime is installed and running (for example `orbstack status`, `colima status`,

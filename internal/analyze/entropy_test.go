@@ -62,3 +62,42 @@ func TestEntropyAnalyzerFlagsLongDenseLine(t *testing.T) {
 		t.Errorf("expected at least Medium severity, got %s", findings[0].Severity)
 	}
 }
+
+func TestEntropyAnalyzerExcludesSVGPathData(t *testing.T) {
+	// Real SVG icons legitimately carry one long line of path coordinates
+	// (M/L/C/Z commands, digits, commas) that reads as long and moderately
+	// high entropy without being an obfuscated payload.
+	long := strings.Repeat("M12.5,3.2 L45.1,88.7 C10.2,20.5 30.9,40.1 50.0,60.0 Z ", 20)
+	files := []ScannedFile{{
+		RelPath: "public/icon.svg",
+		Content: long,
+		Lines:   []string{long},
+	}}
+	findings, err := entropyAnalyzer{}.Analyze(files)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected no entropy findings for .svg path data, got %+v", findings)
+	}
+}
+
+func TestEntropyAnalyzerScansSVGWithScriptTag(t *testing.T) {
+	// An SVG carrying a <script> tag is executable, not static vector
+	// graphics, so it must lose the path-data exclusion above and still be
+	// scrutinized like any other code.
+	longObfuscated := "var _payload = \"" + strings.Repeat("aGVsbG8gd29ybGQhIHRoaXMgaXMgc29tZSByYW5kb20gbG9va2luZyBkYXRh", 10) + "\";"
+	content := "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>" + longObfuscated + "</script></svg>"
+	files := []ScannedFile{{
+		RelPath: "public/evil.svg",
+		Content: content,
+		Lines:   []string{content},
+	}}
+	findings, err := entropyAnalyzer{}.Analyze(files)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected the script-carrying SVG's long line to still be flagged, got %d findings: %+v", len(findings), findings)
+	}
+}

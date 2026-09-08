@@ -174,6 +174,20 @@ detection alone, with no container and no Docker dependency at all.
   - Dedupe collapses repeats of the same (analyzer, category, message, file)
     into one finding with an occurrence count, so one large or repetitive
     file cannot flood the report.
+  - The entropy analyzer excludes `.svg` (`isSVGPath` in `walk.go`, alongside
+    `isMinifiedOrVendorPath`), but ONLY when the file has no `<script>` tag
+    (`svgScriptTagRe` in `entropy.go`): SVG path/viewBox attributes are
+    legitimately one long line of numeric coordinate data, which reads as
+    long and moderately high-entropy without being an obfuscated payload, but
+    an SVG that carries a `<script>` tag is executable, not static vector
+    graphics, and loses the exclusion (the whole file, since a
+    script-carrying SVG is unusual enough on its own to warrant scrutinizing
+    its other long lines too). This exclusion is entropy-only regardless: it
+    does NOT treat SVG as inert. `.svg` is deliberately absent from
+    `proseExtensions` (SVG can also execute via `onload=`/`onclick=`
+    handlers, not just `<script>`, a real XSS vector), so regex.go's
+    signature checks keep scanning ALL `.svg` content unfiltered and at full
+    severity regardless of this exclusion.
 - Two build variants ship: pure static (no AST) and cgo (full). Same binary
   name and commands.
 - `internal/sandbox` NEVER imports `analyze` or any analyzer; purity there is
@@ -192,6 +206,24 @@ detection alone, with no container and no Docker dependency at all.
   scanning entirely. `meguard scan <repo>` runs the same detection alone, with
   no Docker dependency, and exits non-zero on any High/Critical finding by
   default (its whole purpose is triage/gating).
+- Output verbosity: both commands default to a COMPACT report (a one-line-
+  per-stage status checklist, only the High/Critical findings individually
+  with the rest rolled into one summary line, and no raw install log unless
+  the install failed) so the default run is legible to a human at a glance.
+  `-v`/`--verbose` restores the full report: the protections rationale, every
+  finding, and the streamed install log. Nothing about detection or
+  containment changes between the two; this is presentation only (see
+  `printCompactReport`/`printCompactScanSection` in `cmd/run.go`/`cmd/scan.go`
+  vs. `printPreRunNotice`/`printScanSection`/`printResult`).
+  `cmd/run.go` buffers the install command's own Stdout/Stderr into a
+  discardable buffer to implement this (only flushed on a non-zero exit or a
+  hard error), but `sandbox.ExecuteOptions` has a separate `Diag` writer
+  (`internal/sandbox/execute.go`) for meguard's OWN operational diagnostics
+  (cleanup failures, egress-monitor-read failures), which `cmd/run.go` always
+  points at the real stderr regardless of `-v` or exit code. This split
+  exists so a `docker rm -f` or monitor-read failure is never silently lost
+  inside the discarded buffer just because the install itself succeeded
+  (found by the security-reviewer gate on this change; see decision 0017).
 
 ## Build and test commands (both variants)
 

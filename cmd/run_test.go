@@ -105,6 +105,48 @@ func TestPrintPreRunNoticeRuntime(t *testing.T) {
 	}
 }
 
+// TestPrintCompactReportChecklistAndFindings covers the default (non
+// --verbose) "meguard run" output: a status-checklist line per stage plus
+// the top scan findings, rather than the full protections prose and finding
+// list --verbose prints.
+func TestPrintCompactReportChecklistAndFindings(t *testing.T) {
+	var buf bytes.Buffer
+	profile := sandbox.Profile{InspectEgress: true}.Normalize()
+	result := sandbox.Result{
+		InstallExitCode: 0,
+		EgressInspected: true,
+		Egress:          []sandbox.EgressEvent{{Proto: "dns", Dest: "registry.npmjs.org"}},
+	}
+	report := analyze.Report{
+		FilesScanned: 109,
+		Findings: []analyze.Finding{
+			{Analyzer: "entropy", Severity: analyze.High, File: "tailwind.config.ts", Line: 98, Message: "abnormally long line"},
+			{Analyzer: "entropy", Severity: analyze.Medium, File: "src/components/ui/button.tsx", Line: 8, Message: "abnormally long line"},
+		},
+	}
+	printCompactReport(&buf, profile, result, true, report)
+	out := buf.String()
+	for _, want := range []string{
+		"✓ sandbox",
+		"✓ install",
+		"! scan       2 finding(s) (1 high, 1 medium) across 109 files",
+		"✓ egress     1 blocked (registry.npmjs.org), 0 reached the network",
+		"✓ secrets    0 exposed",
+		"Top findings:",
+		"HIGH",
+		"tailwind.config.ts:98",
+		"RESULT: clean install, 0 secrets exposed, 1 egress attempt(s) blocked",
+		"Review the 1 high/critical finding(s) above",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("compact report missing %q\n  got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "active protections:") {
+		t.Errorf("compact report must not include the verbose protections prose\n  got:\n%s", out)
+	}
+}
+
 func TestPrintResult(t *testing.T) {
 	var buf bytes.Buffer
 	printResult(&buf, sandbox.Result{InstallExitCode: 5}, true, analyze.Report{})

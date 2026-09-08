@@ -48,9 +48,30 @@ type ExecuteOptions struct {
 	// Profile selects the image, install command, and resource ceilings. Its
 	// zero value is fully locked down.
 	Profile Profile
-	// Stdout and Stderr receive the streamed sandbox output.
+	// Stdout and Stderr receive the streamed sandbox output (the install
+	// command's own stdio).
 	Stdout io.Writer
 	Stderr io.Writer
+	// Diag receives meguard's OWN operational diagnostics (cleanup failures,
+	// egress-monitor-read failures), separate from the install command's own
+	// stdio above. Optional: when nil, these fall back to Stderr, matching
+	// the historical behavior of sharing one writer for both. A caller that
+	// captures Stdout/Stderr into a buffer it may discard (e.g. to keep a
+	// clean install's log out of a compact report) should set Diag to a
+	// writer it does NOT discard, so a cleanup or monitor-read failure is
+	// never silently lost regardless of whether the install itself
+	// succeeded.
+	Diag io.Writer
+}
+
+// diag returns where to write meguard's own operational diagnostics: Diag if
+// set, else Stderr (preserving the old behavior for any caller that has not
+// set Diag).
+func (o ExecuteOptions) diag() io.Writer {
+	if o.Diag != nil {
+		return o.Diag
+	}
+	return o.Stderr
 }
 
 // cleanupTimeout bounds the detached removal so cleanup cannot hang forever.
@@ -95,7 +116,7 @@ func Execute(ctx context.Context, r Runner, opts ExecuteOptions) (result Result,
 		// Guarantee monitor removal on every path. Deferred LIFO ordering means
 		// this runs AFTER the sandbox removal deferred below, so the sandbox
 		// (which shares the monitor netns) is gone before the monitor.
-		defer removeDetached(r, monitorName, opts.Stderr)
+		defer removeDetached(r, monitorName, opts.diag())
 		// The sandbox joins the monitor's netns instead of getting --network none.
 		p.NetworkContainer = monitorName
 	}
@@ -108,7 +129,7 @@ func Execute(ctx context.Context, r Runner, opts ExecuteOptions) (result Result,
 	// From here on the container exists; guarantee its removal. Deferred
 	// functions run during panic unwinding and after any return, so this covers
 	// install failure, panic, and Ctrl-C alike.
-	defer removeDetached(r, id, opts.Stderr)
+	defer removeDetached(r, id, opts.diag())
 
 	if err := r.Start(ctx, id); err != nil {
 		return Result{}, fmt.Errorf("start sandbox: %w", err)
@@ -136,7 +157,7 @@ func Execute(ctx context.Context, r Runner, opts ExecuteOptions) (result Result,
 		// rather than misreporting zero attempts.
 		events, cErr := inspector.CollectEgress(ctx, monitorName)
 		if cErr != nil {
-			fmt.Fprintf(opts.Stderr, "meguard: could not read egress monitor: %v\n", cErr)
+			fmt.Fprintf(opts.diag(), "meguard: could not read egress monitor: %v\n", cErr)
 			result.EgressReadFailed = true
 		} else {
 			result.Egress = events

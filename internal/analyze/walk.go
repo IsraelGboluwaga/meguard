@@ -151,3 +151,21 @@ func isMinifiedOrVendorPath(relPath string) bool {
 	}
 	return false
 }
+
+// isSVGPath reports whether relPath is an SVG file. SVG path/viewBox
+// attributes are legitimately one long line of numeric coordinate data,
+// which reads as a long, moderately-high-entropy line without being an
+// obfuscated payload -- the same false-positive shape isMinifiedOrVendorPath
+// exists to avoid, so entropy.go excludes SVG the same way.
+//
+// This exclusion is conditional, not blanket: unlike prose, SVG can execute
+// (inline <script>, onload=/onclick= handlers -- a real XSS vector), so
+// entropy.go only honors this exclusion when the file has no <script> tag
+// (see svgScriptTagRe there); a script-carrying SVG loses it. Either way, the
+// specific signature checks in regex.go are NOT extension-scoped and keep
+// scanning .svg content unfiltered, and .svg is deliberately absent from
+// proseExtensions in analyze.go (which would cap it at Info, treating it as
+// inert).
+func isSVGPath(relPath string) bool {
+	return strings.EqualFold(filepath.Ext(relPath), ".svg")
+}

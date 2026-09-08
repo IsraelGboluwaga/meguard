@@ -8,6 +8,48 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ## [Unreleased]
 
+### Changed
+
+- `meguard run` and `meguard scan` default output is now COMPACT instead of
+  the previous full detail: a one-line header, a per-stage status checklist
+  (`sandbox`/`install`/`scan`/`egress`/`secrets` for `run`; `scan` alone for
+  `scan`, using `✓`/`!`/`✗` glyphs), a "Top findings" block that lists every
+  High/Critical finding individually (capped at 8) with everything else
+  rolled into one "... N more" summary line (grouped by analyzer, with a
+  "mostly `<dir>`/*" hint when one directory dominates), and a single
+  free-text `RESULT: ...` sentence. The raw install log is captured but only
+  printed if the install exited non-zero. New `-v`/`--verbose` flag on both
+  commands restores the exact previous behavior: the `meguard: preparing
+  locked-down sandbox` header with the full active-protections prose, every
+  scan finding listed individually with its snippet under `STATIC SCAN`, and
+  the streamed `SANDBOX OUTPUT` section. Presentation only: detection,
+  containment, exit codes, `--fail-on-scan`, and `--no-scan` behave
+  identically in both modes.
+- `sandbox.ExecuteOptions` gained a `Diag io.Writer` field
+  (`internal/sandbox/execute.go`) for meguard's own operational diagnostics
+  (cleanup failures, egress-monitor-read failures), separate from the install
+  command's own Stdout/Stderr. Falls back to `Stderr` when unset, so this is
+  additive and does not change behavior for any existing caller that has not
+  set it.
+
+### Fixed
+
+- `entropy` analyzer: exclude a `.svg` file from the long-line/entropy
+  heuristic (`isSVGPath` in `internal/analyze/walk.go`, alongside the
+  existing `isMinifiedOrVendorPath`), but ONLY when it carries no `<script>`
+  tag (`svgScriptTagRe` in `internal/analyze/entropy.go`), fixing a false
+  positive on legitimate SVG icons where `<path d="...">`/`viewBox`
+  coordinate data reads as one long, moderately-high-entropy line without
+  being an obfuscated payload. An SVG that does carry a `<script>` tag is
+  executable, not static graphics, so it loses the exclusion for the whole
+  file. Either way the exclusion is entropy-only: `.svg` is deliberately NOT
+  added to `proseExtensions`, so `regex.go`'s signature checks (script tags,
+  eval, obfuscator fingerprints, exfil URLs, etc.) still scan ALL `.svg`
+  content unfiltered and at full severity regardless, since SVG can also
+  execute via `onload=`/`onclick=` handlers. New tests:
+  `TestEntropyAnalyzerExcludesSVGPathData`,
+  `TestEntropyAnalyzerScansSVGWithScriptTag`.
+
 ### Added
 
 - Static scan, implemented (`internal/analyze`): manifest, entropy, and regex
