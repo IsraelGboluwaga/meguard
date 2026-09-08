@@ -39,6 +39,28 @@ type Profile struct {
 	// PidsLimit caps the number of processes via --pids-limit. Zero means
 	// DefaultPidsLimit.
 	PidsLimit int
+
+	// InspectEgress, when true, RELAXES the default --network none into a
+	// monitored, egress-dropped network stack: a packet-level monitor sidecar
+	// (see EgressInspector) becomes the sandbox's only route, logs every
+	// outbound connection attempt, and drops it. Nothing ever leaves the host.
+	//
+	// SAFETY INVARIANT 3: the zero value (false) is the safest behavior
+	// (--network none, no stack at all). This field only ever RELAXES, and the
+	// relaxation is still no-egress; it just makes blocked attempts visible.
+	InspectEgress bool
+
+	// MonitorImage overrides the egress monitor image (see DefaultMonitorImage).
+	// It is only consulted when InspectEgress is true. Empty means the default.
+	// The image must provide ip (iproute2), iptables, and tcpdump.
+	MonitorImage string
+
+	// NetworkContainer is internal plumbing set by Execute, NOT user-facing.
+	// When non-empty it names the monitor container whose network namespace the
+	// sandbox joins (--network container:<name>). Empty (the zero value) means
+	// --network none. It is never populated from user input; Execute sets it
+	// only after it has started the monitor for an InspectEgress run.
+	NetworkContainer string
 }
 
 // Conservative defaults. These are ceilings and ecosystem choices only; none of

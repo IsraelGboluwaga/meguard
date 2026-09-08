@@ -136,7 +136,69 @@ here.
   to be parsed as a git flag (for example `--upload-pack`), independent of the
   gate. Cheap, unconditional defense in depth on the host-side boundary.
 
-## 0014 - Ecosystem auto-detection from repo manifests
+## 0014 - Egress visibility via a packet-level monitor sidecar, not a proxy
+
+- Decision: Add opt-in `--inspect-egress`. When set, a hardened monitor sidecar
+  seals its own network namespace (real uplink torn down, default route pointed
+  at a dummy sinkhole, `iptables` DROP + DNS redirect) and captures every
+  outbound SYN and DNS query with `tcpdump`; the sandbox joins that netns via
+  `--network container:<monitor>`. Blocked attempts are reported per line. The
+  default stays `--network none`. The monitor is the only container granted
+  NET_ADMIN/NET_RAW and runs NO repo code; the sandbox keeps `--cap-drop ALL`.
+  meguard waits for the monitor's readiness marker before creating the sandbox,
+  so the sandbox never joins an unsealed netns (fail closed).
+- Alternatives:
+  - A logging HTTP/S proxy (rejected: only sees proxy-aware HTTP(S); raw-socket
+    malware bypasses it silently, giving dangerous false confidence in a
+    security tool).
+  - A DNS sinkhole only (rejected: misses connections to hardcoded IPs, exactly
+    the evasion C2/miners use; packet-level SYN capture subsumes it).
+  - Keeping `--network none` and never reporting (rejected: the product promise
+    is "run it to SEE it is safe", and silent containment delivered only half of
+    that; this was the standing TODO).
+- Reason: A security tool must not under-report. Packet-level capture sees every
+  connection attempt to any IP:port plus DNS, so a hardcoded-IP beacon is logged,
+  not missed. It relaxes invariant 4 in wording only: egress is still fully
+  denied (the netns has no route out); the relaxation just makes the denial
+  observable, and it is opt-in so the zero-value posture is unchanged
+  (invariant 3). LIVE-VERIFICATION NOTE: the in-container netns/iptables script
+  needs one verification pass on a Linux Docker host; the Go layers are unit
+  tested.
+- Update (post security-review gate): the first cut sealed egress with an
+  interface-specific `iptables -A OUTPUT -o eth0 -j DROP` guarded by `|| true`,
+  handled no IPv6, and printed the readiness marker regardless of whether the
+  rule applied - a fail-OPEN gap. Hardened to fail-CLOSED: the seal is now an
+  OUTPUT DROP policy (interface-independent) for IPv4 and IPv6, DNS is forced to
+  the sinkhole, capture moved to NFLOG in-chain (before the drop), every critical
+  rule runs without `|| true`, and the script verifies the policy before echoing
+  readiness; `waitForMonitorReady` fails fast if the monitor exits first. The
+  feature is labeled experimental and its user-facing text no longer claims
+  unconditional containment until the live-verification pass lands.
+- Update (default flip, at the maintainer's direction): egress inspection is now
+  the DEFAULT for `meguard run`; the old opt-in `--inspect-egress` flag is
+  removed and `--strict` is the opt-out to `--network none`. Rationale: the
+  product promise is "run it to SEE what it tried", so visibility should be the
+  default experience, not an opt-in. Safety is preserved three ways: (1) egress
+  is denied in BOTH modes; (2) the library zero-value Profile is still
+  `--network none`, so invariant 3 (a forgotten field cannot open a hole) is
+  unchanged - the flip is a CLI default only; (3) because inspected mode is
+  experimental and needs a monitor image + NFLOG, a monitor that cannot start
+  makes the CLI fall back to `--network none` with a warning
+  (`ErrMonitorUnavailable`), never to open egress and never silently. CLAUDE.md
+  invariant 4 is rewritten from "hardcoded `--network none`" to "egress always
+  denied, in one of two modes".
+- Update (live-verified): the seal was verified on Docker/OrbStack (a real Linux
+  kernel) - hardcoded-IP SYNs logged+dropped, no leak to a sibling container on
+  the bridge subnet (proving the OUTPUT DROP policy seals on-link routes), DNS
+  captured by name, IPv6 sealed, clean run reports zero attempts, fallback works,
+  no container leaks. Two bugs found and fixed during verification: a read race
+  (fixed with a ~1.2s flush wait before reading the monitor log) and a
+  nil-vs-empty misreport of a clean run as "could not be read" (fixed with a
+  distinct `Result.EgressReadFailed`). Not yet checked: rootless runtimes
+  (Podman) and kernels without `nfnetlink_log`, where the monitor fails to start
+  and the CLI falls back to `--network none`.
+
+## 0015 - Ecosystem auto-detection from repo manifests
 
 - Decision: When `--image` / `--cmd` are unset, detect the ecosystem by reading
   the repo's top-level manifest files (`sandbox.DetectEcosystem`) and supply the

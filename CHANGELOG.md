@@ -8,8 +8,57 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ## [Unreleased]
 
+### Changed
+
+- Egress inspection is now the DEFAULT for `meguard run` (previously opt-in via
+  `--inspect-egress`, now removed). A plain `meguard run <repo>` logs every
+  blocked outbound attempt. The new `--strict` flag drops to `--network none`
+  (no network stack at all, no logs) for the hardest, fully-verified containment.
+  Egress is denied in both modes. Because inspected mode needs a monitor image +
+  NFLOG, the CLI FALLS BACK to `--network none` with a printed warning if the
+  monitor cannot start (`sandbox.ErrMonitorUnavailable`), so `meguard run` keeps
+  working everywhere and never silently loses containment. The library zero-value
+  Profile still selects `--network none`, so invariant 3 is unchanged; CLAUDE.md
+  invariant 4 is updated to "egress always denied, in one of two modes".
+  - VERIFIED on Docker/OrbStack (real Linux kernel): hardcoded-IP SYNs logged and
+    dropped, no leak to a sibling container on the bridge subnet, DNS captured by
+    name, IPv6 sealed, clean run reports "0 attempts", monitor-unavailable falls
+    back, no container leaks. Rootless runtimes not yet checked.
+  - Fixes found during that verification: (1) Execute now waits ~1.2s
+    (`monitorFlushDelay`) for tcpdump to flush before reading the monitor log, so
+    a single fast packet (one DNS query) is not missed by a read race; (2) a
+    clean inspected run (zero captured events) is now reported as "0 outbound
+    attempts" instead of being misreported as "monitor output could not be read"
+    - the read-failure path is now a distinct `Result.EgressReadFailed` signal.
+
 ### Added
 
+- Packet-level egress visibility (the default `meguard run` behavior; see
+  Changed above for the default-flip and `--strict`). meguard starts a hardened
+  monitor sidecar (its own netns has no route out, only a logging sinkhole) and
+  the sandbox joins that netns via `--network container:<monitor>`. Every
+  outbound TCP connection attempt (to any IP:port, so hardcoded C2 is caught) and
+  DNS query is LOGGED and DROPPED; nothing ever leaves the host. The result
+  section lists blocked attempts (e.g. `BLOCKED tcp 185.220.101.5:443`) and
+  states an explicit "0 outbound attempts" when the repo made none. A new
+  `--monitor-image` overrides the monitor image (default `nicolaka/netshoot`;
+  must provide `ip`, `iptables`, `ip6tables`, `tcpdump`+NFLOG). The sandbox
+  joining the monitor netns gains NO capability; the monitor is the only
+  container granted NET_ADMIN/NET_RAW and runs no repo code. Egress inspection
+  rides on an OPTIONAL `EgressInspector` interface, so the core `Runner` is
+  unchanged and the `--strict`/`--network none` path never touches the monitor
+  code.
+  - Fail-closed sealing (hardened after a security review): the monitor sets the
+    OUTPUT policy to DROP for IPv4 and IPv6 (interface-independent, so it no
+    longer depends on the uplink being named `eth0`), logs via NFLOG in-chain
+    before the drop, forces all DNS (incl. Docker's embedded `127.0.0.11`) to the
+    sinkhole, runs every critical rule without `|| true`, and verifies the policy
+    applied before printing the readiness marker. `waitForMonitorReady` also
+    fails fast if the monitor exits before sealing. So a partial or failed seal
+    can never reach the sandbox-create step.
+  - Not over-claimed: the pre-run notice, result line, and README state the
+    guarantee level rather than an unconditional "nothing leaves the host". Live
+    verification on Docker/OrbStack is recorded under Changed above.
 - Ecosystem auto-detection (`sandbox.DetectEcosystem` in
   `internal/sandbox/detect.go`): `run` inspects the repo's top-level manifest
   files and picks the image and install command when `--image` / `--cmd` are
@@ -105,8 +154,9 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 ### Notes
 
 - The `run` binary is pure Go (no cgo) and ships as a single static file.
-- Network is `--network none`, hardcoded for this slice; no egress.
+- Egress is always denied. The default `meguard run` inspects (drops + logs)
+  egress via a monitor sidecar; `--strict` uses `--network none` (no stack, no
+  logs). If the monitor cannot start, the CLI falls back to `--network none`.
 - `--memory` and `--cpus` are conservative defaults that will become
   user-configurable.
-- TODO: surface blocked-egress attempts once an inspecting proxy exists.
 - scan, analyzers, and tree-sitter are NOT implemented in this slice.

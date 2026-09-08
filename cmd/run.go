@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,8 @@ func newRunCmd() *cobra.Command {
 	var image string
 	var installCmd string
 	var runtimeBin string
+	var strict bool
+	var monitorImage string
 
 	cmd := &cobra.Command{
 		Use:   "run <repo-url-or-path>",
@@ -36,7 +39,14 @@ runtime via --runtime (for example "podman") so a container escape lands as an
 unprivileged user rather than host root.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
-			return runSandbox(c.Context(), args[0], image, installCmd, runtimeBin, c.OutOrStdout(), c.ErrOrStderr())
+			return runSandbox(c.Context(), runOptions{
+				source:       args[0],
+				image:        image,
+				installCmd:   installCmd,
+				runtimeBin:   runtimeBin,
+				strict:       strict,
+				monitorImage: monitorImage,
+			}, c.OutOrStdout(), c.ErrOrStderr())
 		},
 	}
 
@@ -50,11 +60,28 @@ unprivileged user rather than host root.`,
 	// shrink the blast radius of a container escape and are preferred for
 	// hostile code.
 	cmd.Flags().StringVar(&runtimeBin, "runtime", "", `Docker-compatible runtime CLI (default "docker"; e.g. "podman" for rootless)`)
+	// Egress is DENIED in both modes. By default meguard runs in inspected mode
+	// (egress dropped AND logged via a monitor sidecar) so you can see what a repo
+	// tried to reach. --strict drops to the fully verified --network none (no
+	// network stack at all, no logs) for the hardest containment.
+	cmd.Flags().BoolVar(&strict, "strict", false, "strictest containment: --network none, no network stack at all and no egress logs (default logs blocked egress; verified on Docker/OrbStack, needs a monitor image with ip/iptables/tcpdump+NFLOG)")
+	cmd.Flags().StringVar(&monitorImage, "monitor-image", "", "image for the egress monitor sidecar (default nicolaka/netshoot; must provide ip, iptables, ip6tables, tcpdump+NFLOG)")
 	return cmd
 }
 
-func runSandbox(ctx context.Context, source, image, installCmd, runtimeBin string, stdout, stderr io.Writer) error {
-	runner := sandbox.DockerRunner{Binary: runtimeBin}
+// runOptions groups the flags for a single run so the signature stays readable
+// as options accrue.
+type runOptions struct {
+	source       string
+	image        string
+	installCmd   string
+	runtimeBin   string
+	strict       bool
+	monitorImage string
+}
+
+func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) error {
+	runner := sandbox.DockerRunner{Binary: o.runtimeBin}
 
 	// Fail fast with actionable guidance if no runtime is reachable, before we
 	// clone anything or print a pre-run notice for a run that cannot start.
@@ -62,16 +89,23 @@ func runSandbox(ctx context.Context, source, image, installCmd, runtimeBin strin
 		return err
 	}
 
-	repoDir, cleanup, err := resolveRepo(ctx, source, stderr)
+	repoDir, cleanup, err := resolveRepo(ctx, o.source, stderr)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	profile := sandbox.Profile{Image: image}
+	profile := sandbox.Profile{
+		Image: o.image,
+		// Egress inspection is the DEFAULT; --strict opts down to --network none.
+		// The library zero value (InspectEgress=false) remains the safest one, so
+		// this is a CLI-level default, not a change to invariant 3.
+		InspectEgress: !o.strict,
+		MonitorImage:  o.monitorImage,
+	}
 	// docker exec runs without a shell, so splitting on whitespace is the right
 	// tokenization. Quoted arguments are not supported yet (documented).
-	if fields := strings.Fields(installCmd); len(fields) > 0 {
+	if fields := strings.Fields(o.installCmd); len(fields) > 0 {
 		profile.InstallCmd = fields
 	}
 
@@ -91,7 +125,7 @@ func runSandbox(ctx context.Context, source, image, installCmd, runtimeBin strin
 		}
 	}
 
-	printPreRunNotice(stdout, source, runtimeBin, ecosystem, profile.Normalize())
+	printPreRunNotice(stdout, o.source, o.runtimeBin, ecosystem, profile.Normalize())
 
 	fmt.Fprintln(stdout, sectionRule)
 	fmt.Fprintln(stdout, "SANDBOX OUTPUT")
@@ -103,6 +137,23 @@ func runSandbox(ctx context.Context, source, image, installCmd, runtimeBin strin
 		Stdout:  stdout,
 		Stderr:  stderr,
 	})
+	// Default (inspected) mode is experimental and needs a monitor image + NFLOG.
+	// If the monitor cannot start, fall back to the fully verified --network none
+	// mode with a loud warning rather than failing the run. This never weakens
+	// containment (none is stronger than inspected); it only loses the egress
+	// logs, and the fallback is stated, never silent. --strict skips inspection
+	// entirely, so there is nothing to fall back from.
+	if err != nil && profile.InspectEgress && errors.Is(err, sandbox.ErrMonitorUnavailable) {
+		fmt.Fprintf(stderr, "meguard: egress inspection unavailable (%v)\n", err)
+		fmt.Fprintln(stderr, "meguard: falling back to --network none (egress still fully denied, but no egress logs). Fix the monitor image/runtime for logs, or pass --strict to require this mode.")
+		profile.InspectEgress = false
+		result, err = sandbox.Execute(ctx, runner, sandbox.ExecuteOptions{
+			RepoDir: repoDir,
+			Profile: profile,
+			Stdout:  stdout,
+			Stderr:  stderr,
+		})
+	}
 	if err != nil {
 		return err
 	}
@@ -184,7 +235,12 @@ func printPreRunNotice(w io.Writer, source, runtimeBin, ecosystem string, p sand
 	fmt.Fprintln(w, "active protections:")
 	fmt.Fprintln(w, "  - repo code NEVER runs on the host (git clone only; all execution in-container)")
 	fmt.Fprintln(w, "  - NO host $HOME and NO repo bind mounts (repo is copied into a container tmpfs)")
-	fmt.Fprintln(w, "  - network DENIED (--network none, no egress)")
+	if p.InspectEgress {
+		fmt.Fprintf(w, "  - network INSPECTED via monitor sidecar (%s): the netns is sealed fail-closed (OUTPUT DROP), every outbound attempt is logged then dropped\n", p.MonitorImageOrDefault())
+		fmt.Fprintln(w, "    verified on Docker/OrbStack (Linux); rootless runtimes not yet checked. If the monitor cannot start, meguard falls back to --network none automatically. Pass --strict for the no-stack --network none mode.")
+	} else {
+		fmt.Fprintln(w, "  - network DENIED (--strict: --network none, no egress, no logs)")
+	}
 	fmt.Fprintln(w, "  - ephemeral: the container is force-removed on exit, panic, or Ctrl-C")
 }
 
@@ -193,6 +249,34 @@ func printResult(w io.Writer, r sandbox.Result) {
 	fmt.Fprintln(w, "RESULT")
 	fmt.Fprintln(w, sectionRule)
 	fmt.Fprintf(w, "install exit code: %d\n", r.InstallExitCode)
-	fmt.Fprintln(w, "0 host secrets exposed (by construction: no host mounts, scratch HOME, no network)")
-	fmt.Fprintln(w, "TODO: surface blocked-egress attempts once an inspecting proxy exists")
+	if r.EgressInspected {
+		fmt.Fprintln(w, "0 host secrets exposed (by construction: no host mounts, scratch HOME; egress sealed fail-closed and logged)")
+	} else {
+		fmt.Fprintln(w, "0 host secrets exposed (by construction: no host mounts, scratch HOME, no network)")
+	}
+	printEgress(w, r)
+}
+
+// printEgress renders the blocked-egress report. Nothing leaves the host in any
+// case; this only reports what the repo TRIED to do.
+func printEgress(w io.Writer, r sandbox.Result) {
+	if !r.EgressInspected {
+		fmt.Fprintln(w, "egress: not inspected (--network none; egress is fully denied but not logged)")
+		return
+	}
+	if r.EgressReadFailed {
+		// Inspected, but the monitor's capture could not be read. Containment
+		// still held; only the report is missing. This is NOT the same as a
+		// clean run, so it must never be conflated with "0 attempts".
+		fmt.Fprintln(w, "egress: inspected, but the monitor output could not be read (see stderr); egress was still blocked")
+		return
+	}
+	if len(r.Egress) == 0 {
+		fmt.Fprintln(w, "egress: 0 outbound attempts observed (repo made no network calls during install)")
+		return
+	}
+	fmt.Fprintf(w, "egress: %d outbound attempt(s) BLOCKED (logged and dropped; none reached the network):\n", len(r.Egress))
+	for _, e := range r.Egress {
+		fmt.Fprintf(w, "  - %s\n", e.String())
+	}
 }

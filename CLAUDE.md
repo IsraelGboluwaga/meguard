@@ -16,20 +16,36 @@ This file is the working contract. Read it before making changes.
 3. Sandbox defaults are locked down; configuration only ever RELAXES. A
    zero-value Profile must be the safest Profile. A forgotten field cannot open
    a hole.
-4. Network is `--network none`, hardcoded for this slice. No egress at all.
-5. Cleanup (`docker rm -f`) MUST run on install failure, panic, or Ctrl-C.
-   Use defer plus signal handling.
+4. Network egress is ALWAYS denied - no repo traffic ever reaches the network.
+   Two modes deny it, and configuration only ever chooses between them:
+   - DEFAULT (CLI): INSPECTED mode. The sandbox joins a monitor sidecar's netns
+     that is sealed fail-closed (OUTPUT DROP policy for IPv4+IPv6, verified
+     before the sandbox is created); every outbound attempt is logged then
+     dropped. Egress is denied by policy.
+   - `--strict`: `--network none`, no network stack at all. Egress is denied by
+     absence. This is the strongest, fully verified mode.
+   Neither mode ever permits egress. The library-level default (the zero-value
+   Profile) is still `--network none`; INSPECTED is a CLI default only. If the
+   monitor cannot start, the CLI falls back to `--network none` (never to open
+   egress). Inspected mode is EXPERIMENTAL until verified on a live Linux host.
+5. Cleanup (`docker rm -f`) MUST run on install failure, panic, or Ctrl-C, for
+   BOTH the sandbox and (in inspected mode) the monitor. Use defer plus signal
+   handling.
 
 Where they live in code:
 - Invariant 1: `cmd/run.go` `resolveRepo` (git clone only on host) and
   `internal/sandbox` (all exec via `docker exec`).
 - Invariant 2: `internal/sandbox/args.go` (tmpfs mounts, no bind mounts) and
   `docker.go` `CopyInto` (`docker cp`).
-- Invariant 3: `internal/sandbox/profile.go` (zero value is safest; Normalize
-  only fills gaps) and `args.go` (hardening flags are unconditional).
-- Invariant 4: `internal/sandbox/args.go` (`--network none`, hardcoded).
-- Invariant 5: `internal/sandbox/execute.go` (deferred detached-context Remove)
-  and `main.go` (signal.NotifyContext).
+- Invariant 3: `internal/sandbox/profile.go` (zero value is safest - including
+  InspectEgress=false -> `--network none`; Normalize only fills gaps) and
+  `args.go` (hardening flags are unconditional). NOTE: the CLI defaults egress
+  inspection ON (a deliberate product choice); the Profile zero value stays
+  `--network none`, so a forgotten field still cannot open a hole.
+- Invariant 4: `internal/sandbox/args.go` `networkArgs` (`--network none` vs
+  join the monitor netns) and `egress.go` `monitorScript` (fail-closed seal).
+- Invariant 5: `internal/sandbox/execute.go` (deferred detached-context Remove
+  for both containers) and `main.go` (signal.NotifyContext).
 
 ## Container lifecycle (implemented exactly this)
 
@@ -60,7 +76,9 @@ Required hardening flags on create (see `internal/sandbox/args.go`):
     --tmpfs /repo:exec,mode=1777  --tmpfs /home/sandbox  --tmpfs /tmp
     --pids-limit 512
     --memory 2g  --cpus 2
-    --network none
+    --network none            (conditional: default INSPECTED mode instead joins
+                               the monitor netns via --network container:<mon>;
+                               --strict forces --network none. See invariant 4.)
     -w /repo
     -e HOME=/home/sandbox
 

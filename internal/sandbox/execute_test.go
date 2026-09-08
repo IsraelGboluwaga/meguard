@@ -75,6 +75,170 @@ func opts() sandbox.ExecuteOptions {
 	}
 }
 
+// egressFakeRunner is a Runner that ALSO implements EgressInspector, so the
+// two-container orchestration and its cleanup guarantee can be tested without a
+// container daemon. It records a lineage-tagged call log and every removed id.
+type egressFakeRunner struct {
+	monitorName    string
+	startMonErr    error
+	collectEvents  []sandbox.EgressEvent
+	collectErr     error
+	execCode       int
+	execPanic      bool
+	sawNetworkCont string // the NetworkContainer the sandbox was created with
+
+	calls   []string
+	removed []string
+}
+
+func (f *egressFakeRunner) StartMonitor(_ context.Context, _ sandbox.Profile) (string, error) {
+	f.calls = append(f.calls, "startMonitor")
+	if f.startMonErr != nil {
+		return "", f.startMonErr
+	}
+	name := f.monitorName
+	if name == "" {
+		name = "meguard-egress-fake"
+	}
+	return name, nil
+}
+
+func (f *egressFakeRunner) CollectEgress(_ context.Context, _ string) ([]sandbox.EgressEvent, error) {
+	f.calls = append(f.calls, "collect")
+	return f.collectEvents, f.collectErr
+}
+
+func (f *egressFakeRunner) Create(_ context.Context, p sandbox.Profile) (string, error) {
+	f.calls = append(f.calls, "create")
+	f.sawNetworkCont = p.NetworkContainer
+	return "sandbox-id", nil
+}
+func (f *egressFakeRunner) CopyInto(_ context.Context, _, _, _ string) error {
+	f.calls = append(f.calls, "copy")
+	return nil
+}
+func (f *egressFakeRunner) Start(_ context.Context, _ string) error {
+	f.calls = append(f.calls, "start")
+	return nil
+}
+func (f *egressFakeRunner) Exec(_ context.Context, _ string, _ []string, _, _ io.Writer) (int, error) {
+	f.calls = append(f.calls, "exec")
+	if f.execPanic {
+		panic("boom in egress exec")
+	}
+	return f.execCode, nil
+}
+func (f *egressFakeRunner) Remove(_ context.Context, id string) error {
+	f.calls = append(f.calls, "remove")
+	f.removed = append(f.removed, id)
+	return nil
+}
+
+func egressOpts() sandbox.ExecuteOptions {
+	o := opts()
+	o.Profile = sandbox.Profile{InspectEgress: true}
+	return o
+}
+
+// The egress path must: start the monitor first, create the sandbox joined to
+// the monitor's netns, collect blocked attempts, and force-remove BOTH the
+// sandbox and the monitor.
+func TestExecuteEgressHappyPath(t *testing.T) {
+	events := []sandbox.EgressEvent{{Proto: "tcp", Dest: "1.2.3.4:443"}}
+	f := &egressFakeRunner{monitorName: "meguard-egress-xyz", collectEvents: events, execCode: 0}
+
+	res, err := sandbox.Execute(context.Background(), f, egressOpts())
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !res.EgressInspected {
+		t.Error("EgressInspected = false, want true")
+	}
+	if !reflect.DeepEqual(res.Egress, events) {
+		t.Errorf("Egress = %v, want %v", res.Egress, events)
+	}
+	if f.sawNetworkCont != "meguard-egress-xyz" {
+		t.Errorf("sandbox joined netns %q, want the monitor's name", f.sawNetworkCont)
+	}
+	wantOrder := []string{"startMonitor", "create", "start", "copy", "exec", "collect", "remove", "remove"}
+	if !reflect.DeepEqual(f.calls, wantOrder) {
+		t.Errorf("call order = %v, want %v", f.calls, wantOrder)
+	}
+	// Both the sandbox and the monitor must be removed. LIFO: sandbox first.
+	wantRemoved := []string{"sandbox-id", "meguard-egress-xyz"}
+	if !reflect.DeepEqual(f.removed, wantRemoved) {
+		t.Errorf("removed = %v, want %v (both containers, sandbox first)", f.removed, wantRemoved)
+	}
+}
+
+// If the monitor fails to start, the run fails closed: the sandbox is NEVER
+// created, so it can never join an unsealed netns.
+func TestExecuteEgressMonitorStartFailsClosed(t *testing.T) {
+	f := &egressFakeRunner{startMonErr: errors.New("no route sealed")}
+	_, err := sandbox.Execute(context.Background(), f, egressOpts())
+	if err == nil || !strings.Contains(err.Error(), "start egress monitor") {
+		t.Fatalf("error = %v, want it to mention 'start egress monitor'", err)
+	}
+	// The error must be identifiable as ErrMonitorUnavailable so the CLI can fall
+	// back to --network none instead of failing the run.
+	if !errors.Is(err, sandbox.ErrMonitorUnavailable) {
+		t.Errorf("error is not ErrMonitorUnavailable: %v", err)
+	}
+	if !reflect.DeepEqual(f.calls, []string{"startMonitor"}) {
+		t.Errorf("calls = %v, want [startMonitor] only (fail closed, no sandbox)", f.calls)
+	}
+}
+
+// A monitor that cannot be read must NOT fail the run; containment does not
+// depend on the report. Egress stays nil and EgressInspected stays true.
+func TestExecuteEgressCollectErrorIsNonFatal(t *testing.T) {
+	f := &egressFakeRunner{collectErr: errors.New("logs unavailable")}
+	res, err := sandbox.Execute(context.Background(), f, egressOpts())
+	if err != nil {
+		t.Fatalf("Execute error: %v (collect failure must be non-fatal)", err)
+	}
+	if !res.EgressInspected {
+		t.Error("EgressInspected = false, want true")
+	}
+	if res.Egress != nil {
+		t.Errorf("Egress = %v, want nil when monitor unreadable", res.Egress)
+	}
+	// Both containers still removed.
+	if len(f.removed) != 2 {
+		t.Errorf("removed %d containers, want 2", len(f.removed))
+	}
+}
+
+// INVARIANT 5, doubled surface: when the install panics under egress inspection,
+// BOTH the sandbox and the monitor must still be force-removed.
+func TestExecuteEgressRemovesBothOnPanic(t *testing.T) {
+	f := &egressFakeRunner{execPanic: true}
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_, _ = sandbox.Execute(context.Background(), f, egressOpts())
+	}()
+	if recovered == nil {
+		t.Fatal("expected the panic to propagate through Execute")
+	}
+	if len(f.removed) != 2 {
+		t.Errorf("removed %d containers on panic, want 2 (sandbox + monitor)", len(f.removed))
+	}
+}
+
+// Requesting egress inspection from a Runner that does not implement
+// EgressInspector must error, not silently fall back to an unmonitored run.
+func TestExecuteEgressUnsupportedRunnerErrors(t *testing.T) {
+	f := &fakeRunner{} // does not implement EgressInspector
+	_, err := sandbox.Execute(context.Background(), f, egressOpts())
+	if err == nil || !strings.Contains(err.Error(), "does not support") {
+		t.Fatalf("error = %v, want it to mention lack of egress support", err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("no containers should be created; calls = %v", f.calls)
+	}
+}
+
 func TestExecuteHappyPath(t *testing.T) {
 	f := &fakeRunner{execCode: 7}
 	res, err := sandbox.Execute(context.Background(), f, opts())

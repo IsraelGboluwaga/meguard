@@ -21,7 +21,9 @@ The five invariants meguard is built to guarantee:
 3. Sandbox defaults are locked down; configuration only ever RELAXES. The
    zero-value sandbox Profile is the safest one. A forgotten field cannot open a
    hole.
-4. Network is `--network none`. No egress at all.
+4. Network egress is always denied. By default meguard runs INSPECTED (egress
+   dropped **and** logged, so you see what a repo tried to reach); `--strict`
+   drops to `--network none` (no stack at all). Neither mode permits egress.
 5. The container is force-removed (`docker rm -f`) on success, install failure,
    panic, or Ctrl-C.
 
@@ -61,7 +63,7 @@ variants, and verification.
 
 ## Usage
 
-    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"] [--runtime CLI]
+    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"] [--runtime CLI] [--strict]
 
 `run` accepts a git URL (cloned to a temp dir that is always cleaned up) or a
 local path (copied, never bind mounted).
@@ -83,6 +85,12 @@ Examples:
 
     # Rootless runtime (recommended for genuinely hostile code)
     meguard run ./suspicious-repo --runtime podman
+
+    # Default already logs what the repo TRIED to reach (every attempt blocked):
+    meguard run ./suspicious-repo
+
+    # Strictest containment: no network stack at all, no egress logs
+    meguard run ./suspicious-repo --strict
 
 meguard prints a pre-run notice listing the detected ecosystem, the runtime
 enforcing the sandbox, and the active protections, streams the sandbox output
@@ -112,6 +120,42 @@ back to the locked-down defaults (`node:20-slim` / `npm install`). An explicit
 
 `--memory` and `--cpus` are conservative internal defaults (2g / 2 CPUs) that
 will become user-configurable; a large install may need more than 2g.
+
+### Egress logging (default) and `--strict` (experimental default)
+
+By **default**, `meguard run` shows you what a repo tried to reach: a hardened
+monitor sidecar seals a network namespace **fail-closed** (the OUTPUT chain
+defaults to DROP, for IPv4 and IPv6, so containment does not depend on any one
+route or interface name), the sandbox joins that namespace, and every outbound
+connection attempt (to any IP:port, so hardcoded C2 addresses are caught too)
+plus every DNS lookup is logged via NFLOG and then dropped. Egress is still fully
+denied; you just also get to see it:
+
+    egress: 2 outbound attempt(s) BLOCKED (logged and dropped; none reached the network):
+      - BLOCKED tcp 185.220.101.5:443
+      - BLOCKED dns api.evil-c2.net
+
+A clean run states "0 outbound attempts observed" explicitly - absence is stated,
+never silent. The monitor image defaults to `nicolaka/netshoot` and is
+overridable with `--monitor-image`; it must provide `ip`, `iptables`, `ip6tables`,
+and a `tcpdump` with NFLOG support. The sandbox itself gains no privileges - only
+the monitor (which runs no repo code) is granted the two network capabilities it
+needs, and `cap-drop ALL` means the sandbox cannot alter the seal.
+
+**`--strict` is the strongest, fully-verified mode:** `--network none`, no
+network stack at all, no monitor, no egress logs. Use it for the hardest
+containment or in environments where the monitor image / NFLOG is unavailable.
+
+**Egress logging is now the default, and is verified on Docker/OrbStack (a real
+Linux kernel).** The live checklist passed: TCP connection attempts to hardcoded
+IPs are logged and dropped, connections to a sibling container on the docker
+bridge subnet do not leak, DNS lookups are captured by name, IPv6 is sealed,
+cleanup leaves nothing behind, and a repo that makes no calls reports "0 outbound
+attempts". Rootless runtimes (e.g. Podman) and other kernels are not yet checked.
+To keep `meguard run` working everywhere regardless, **if the monitor cannot
+start meguard automatically falls back to `--network none`** with a printed
+warning - egress stays fully denied, you just lose the logs for that run. Pass
+`--strict` to skip the monitor entirely.
 
 ### Choosing a runtime (the trust boundary)
 
