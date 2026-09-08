@@ -106,15 +106,24 @@ of detectors; the first whose marker files exist at the repo root wins:
 | node | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` | `node:20-slim` | `npm install` |
 | python | `requirements.txt` | `python:3.12-slim` | `pip install --user -r requirements.txt` |
 | python | `pyproject.toml`, `setup.py`, `setup.cfg`, `Pipfile` | `python:3.12-slim` | `pip install --user .` |
+| python | any top-level `*.py` (no manifest) | `python:3.12-slim` | `python --version` (no-op) |
 
 Precedence is encoded by detector order: node precedes python (a polyglot repo
 is treated as node, the dominant ecosystem among the untrusted take-home repos
 meguard targets), and within python `requirements.txt` precedes a project
-manifest. When no detector matches, `DetectEcosystem` returns false and the
-caller falls back to the locked-down Profile defaults via `Normalize`.
+manifest, which in turn precedes the loose-script fallback. That last fallback
+(`hasTopLevelPyFile`) recognizes a repo that is just a bare `.py` file with no
+manifest at all, so it lands in the Python image rather than defaulting to node
+and running `npm install` against a missing `package.json`. There is nothing to
+install in that case, so the install command is a NO-OP (`python --version`)
+that never executes repo code (invariant 1 holds and an untrusted script is not
+run automatically); the user runs the script explicitly with `--cmd`. When no
+detector matches at all, `DetectEcosystem` returns false and the caller falls
+back to the locked-down Profile defaults via `Normalize`.
 
-Detection is safe by construction: it only calls `os.Stat` on top-level files
-(never recursively, never reading contents) and runs no repo code, so invariant
+Detection is safe by construction: it only calls `os.Stat` on named top-level
+files and `os.ReadDir` on the repo root for the loose-`.py` fallback (never
+recursively, never reading file contents) and runs no repo code, so invariant
 1 holds - choosing an image is not executing the repo. It only ever supplies the
 image and install command, never a security control, so it cannot weaken the
 box. The node case reuses `DefaultImage` / `DefaultInstallCmd` so it cannot

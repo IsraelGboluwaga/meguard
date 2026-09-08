@@ -80,6 +80,15 @@ func detectNode(root string) (Ecosystem, bool) {
 // (pyproject.toml / setup.py / setup.cfg / Pipfile) means an installable
 // package, so the project itself is installed, which runs its build and setup
 // hooks - exactly the untrusted step meguard wants observed inside the box.
+//
+// As a last resort, a repo with a top-level *.py file but no manifest at all
+// (a loose script, for example a fake-interview repo that is a single .py with
+// no requirements.txt) is still recognized as Python so the sandbox lands in
+// the right ecosystem image instead of falling back to node and running
+// `npm install` against a missing package.json. There is nothing to install in
+// that case, so the install command is a NO-OP (`python --version`): it never
+// executes repo code, so invariant 1 holds and an untrusted script is not run
+// automatically. The user runs the actual script explicitly with --cmd.
 func detectPython(root string) (Ecosystem, bool) {
 	if fileExists(filepath.Join(root, "requirements.txt")) {
 		return pythonEcosystem([]string{"pip", "install", "--user", "-r", "requirements.txt"}), true
@@ -94,7 +103,30 @@ func detectPython(root string) (Ecosystem, bool) {
 			return pythonEcosystem([]string{"pip", "install", "--user", "."}), true
 		}
 	}
+	if hasTopLevelPyFile(root) {
+		return pythonEcosystem([]string{"python", "--version"}), true
+	}
 	return Ecosystem{}, false
+}
+
+// hasTopLevelPyFile reports whether root directly contains a regular file with
+// a .py extension. It reads the top-level directory only (no recursion) and
+// never opens or executes any file, so it keeps detection read-only and
+// invariant 1 intact: choosing a Python image is not running code.
+func hasTopLevelPyFile(root string) bool {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if filepath.Ext(e.Name()) == ".py" {
+			return true
+		}
+	}
+	return false
 }
 
 // pythonEcosystem builds a Python Ecosystem with the given install command.

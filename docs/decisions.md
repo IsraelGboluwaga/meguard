@@ -219,6 +219,18 @@ here.
   values, never a security control, so invariant 3 holds. The node case reuses
   `DefaultImage`/`DefaultInstallCmd` to avoid drift, and pip uses `--user` so
   installs land on the writable HOME tmpfs under the read-only root.
+- Refinement (2026-09-08): Added a python fallback for a repo that is just a
+  bare `.py` file with no manifest at all (`hasTopLevelPyFile`, an `os.ReadDir`
+  of the repo root, still top-level and read-only). Without it such a repo fell
+  through both detectors to the node defaults and ran `npm install` against a
+  missing `package.json` (observed on `IsraelGboluwaga/apalara`: a single
+  `apalara.py`). The fallback lands the sandbox in `python:3.12-slim`. There is
+  nothing to install, so the install command is a NO-OP (`python --version`),
+  chosen deliberately over auto-running the script: meguard executes the
+  ecosystem's install step, but auto-executing an arbitrary untrusted `.py` is a
+  choice the user makes explicitly with `--cmd`, so invariant 1's "no repo code
+  runs unless the user asked" spirit holds. Manifests still win over the loose
+  fallback, and node still wins over python.
 
 ## 0016 - Implement scan; `run` becomes "container AND detector"
 

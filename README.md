@@ -165,9 +165,15 @@ defaults, so run it with an explicit `--image` and `--cmd`.
 | node | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` | `node:20-slim` | `npm install` |
 | python | `requirements.txt` | `python:3.12-slim` | `pip install --user -r requirements.txt` |
 | python | `pyproject.toml`, `setup.py`, `setup.cfg`, `Pipfile` | `python:3.12-slim` | `pip install --user .` |
+| python | any top-level `*.py` (no manifest) | `python:3.12-slim` | `python --version` (no-op) |
 
-Precedence: node wins over python for a polyglot repo, and `requirements.txt`
-wins over a project manifest within python. When nothing matches, meguard falls
+Precedence: node wins over python for a polyglot repo, and within python a
+manifest wins over a loose `.py` script. The last python row is a fallback for a
+repo that is just a bare `.py` file with no manifest (so it lands in the Python
+image instead of defaulting to node and running `npm install` against a missing
+`package.json`): there is nothing to install, so the install command is a no-op
+that runs no repo code. Run the script itself with an explicit `--cmd` (for
+example `--cmd "python apalara.py"`). When nothing matches at all, meguard falls
 back to the locked-down defaults (`node:20-slim` / `npm install`). An explicit
 `--image` or `--cmd` always overrides detection for that value; pip uses
 `--user` so installs land on the writable HOME tmpfs under the read-only root.
