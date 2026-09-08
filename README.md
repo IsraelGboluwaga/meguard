@@ -196,6 +196,11 @@ On the pure build, the absence of AST is stated explicitly, never presented as
 See [CLAUDE.md](CLAUDE.md) for the working contract, coding standards, and the
 standing rule that docs and CHANGELOG are updated in the same change as code.
 
+CI (`.github/workflows/ci.yml`) runs `gofmt -l`, `go build`, `go vet`,
+`go test ./...`, and a cgo-free check on the pure static build for every push
+and pull request against `main`. Releases (`.github/workflows/release.yml`)
+run separately, triggered by pushing a `v*` tag.
+
 ## More docs
 
 - [docs/documentation.md](docs/documentation.md) - architecture and threat model
