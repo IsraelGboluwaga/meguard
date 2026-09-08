@@ -3,6 +3,7 @@ package analyze
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 )
 
@@ -26,6 +27,11 @@ const veryLongLineThreshold = 1000
 // misfire, while base64/packed data still clears it.
 const highEntropyThreshold = 4.8
 
+// svgScriptTagRe matches an SVG <script> tag (case-insensitive). Its
+// presence is what makes an SVG executable rather than static vector
+// graphics (see isSVGPath's exclusion below and the doc comment on it).
+var svgScriptTagRe = regexp.MustCompile(`(?i)<script[\s>]`)
+
 type entropyAnalyzer struct{}
 
 func (entropyAnalyzer) Name() string { return "entropy" }
@@ -34,6 +40,17 @@ func (entropyAnalyzer) Analyze(files []ScannedFile) ([]Finding, error) {
 	var findings []Finding
 	for _, f := range files {
 		if isMinifiedOrVendorPath(f.RelPath) {
+			continue
+		}
+		// isSVGPath's exclusion only holds for an SVG that is actually inert:
+		// one that carries a <script> tag is executable, so it loses the
+		// exclusion and gets the same long-line/entropy scrutiny as any other
+		// code (regex.go's signature checks already scan .svg content
+		// unconditionally regardless of this; this only affects the entropy
+		// heuristic). A script-carrying SVG is itself unusual enough that
+		// scrutinizing its other long lines too, not just the script, is the
+		// conservative choice.
+		if isSVGPath(f.RelPath) && !svgScriptTagRe.MatchString(f.Content) {
 			continue
 		}
 		for i, line := range f.Lines {

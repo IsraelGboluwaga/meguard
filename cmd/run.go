@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ func newRunCmd() *cobra.Command {
 	var monitorImage string
 	var noScan bool
 	var failOnScan bool
+	var verbose bool
 
 	cmd := &cobra.Command{
 		Use:   "run <repo-url-or-path>",
@@ -59,6 +61,7 @@ unprivileged user rather than host root.`,
 				monitorImage: monitorImage,
 				noScan:       noScan,
 				failOnScan:   failOnScan,
+				verbose:      verbose,
 			}, c.OutOrStdout(), c.ErrOrStderr())
 		},
 	}
@@ -85,6 +88,11 @@ unprivileged user rather than host root.`,
 	// CI callers that want a non-zero exit on a bad finding.
 	cmd.Flags().BoolVar(&noScan, "no-scan", false, "skip the static scan entirely (sandbox only, the pre-scan behavior)")
 	cmd.Flags().BoolVar(&failOnScan, "fail-on-scan", false, "after the sandboxed run completes, exit non-zero if the static scan reported any High or Critical finding")
+	// Default output is a compact status checklist plus only the High/Critical
+	// findings (see printCompactReport): enough to see at a glance whether the
+	// repo is worth trusting, without the full protections prose, every
+	// finding, and the raw install log. --verbose restores that full detail.
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "print full detail: protections rationale, every scan finding, and the raw install log")
 	return cmd
 }
 
@@ -99,6 +107,7 @@ type runOptions struct {
 	monitorImage string
 	noScan       bool
 	failOnScan   bool
+	verbose      bool
 }
 
 func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) error {
@@ -146,7 +155,11 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 		}
 	}
 
-	printPreRunNotice(stdout, o.source, o.runtimeBin, ecosystem, profile.Normalize())
+	if o.verbose {
+		printPreRunNotice(stdout, o.source, o.runtimeBin, ecosystem, profile.Normalize())
+	} else {
+		fmt.Fprintf(stdout, "meguard run %s\n\n", o.source)
+	}
 
 	// Static scan runs on the host, read-only, before any container work:
 	// same safety tier as DetectEcosystem above. Findings are advisory (see
@@ -162,20 +175,38 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 			// sandboxed run: detection is additive, containment is the
 			// guarantee. State the failure loudly and continue.
 			fmt.Fprintf(stderr, "meguard: static scan failed (%v); continuing with the sandboxed run\n", scanErr)
-		} else {
+		} else if o.verbose {
 			printScanSection(stdout, stderr, scanReport)
 		}
 	}
 
-	fmt.Fprintln(stdout, sectionRule)
-	fmt.Fprintln(stdout, "SANDBOX OUTPUT")
-	fmt.Fprintln(stdout, sectionRule)
+	// The raw install log is streamed live in --verbose mode (as before). In
+	// compact mode it is captured instead of streamed, and only shown if the
+	// install actually failed (exit != 0) or the run itself errors, since
+	// that is the one case where the log is the thing you need to debug; a
+	// clean install's log is noise (see the npm "Exit handler never called!"
+	// warning in the report that prompted this).
+	var installLog bytes.Buffer
+	instStdout, instStderr := stdout, stderr
+	if o.verbose {
+		fmt.Fprintln(stdout, sectionRule)
+		fmt.Fprintln(stdout, "SANDBOX OUTPUT")
+		fmt.Fprintln(stdout, sectionRule)
+	} else {
+		instStdout, instStderr = &installLog, &installLog
+	}
 
 	result, err := sandbox.Execute(ctx, runner, sandbox.ExecuteOptions{
 		RepoDir: repoDir,
 		Profile: profile,
-		Stdout:  stdout,
-		Stderr:  stderr,
+		Stdout:  instStdout,
+		Stderr:  instStderr,
+		// Diag is ALWAYS the real stderr, regardless of --verbose: meguard's
+		// own operational diagnostics (cleanup failures, egress-monitor-read
+		// failures) must never be silently lost inside installLog just
+		// because the install itself succeeded. Only the install command's
+		// own stdio (Stdout/Stderr above) is ever buffered away.
+		Diag: stderr,
 	})
 	// Default (inspected) mode is experimental and needs a monitor image + NFLOG.
 	// If the monitor cannot start, fall back to the fully verified --network none
@@ -190,19 +221,34 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 		result, err = sandbox.Execute(ctx, runner, sandbox.ExecuteOptions{
 			RepoDir: repoDir,
 			Profile: profile,
-			Stdout:  stdout,
-			Stderr:  stderr,
+			Stdout:  instStdout,
+			Stderr:  instStderr,
+			Diag:    stderr,
 		})
 	}
 	if err != nil {
+		if !o.verbose && installLog.Len() > 0 {
+			fmt.Fprintln(stderr, "meguard: install log:")
+			stderr.Write(installLog.Bytes())
+		}
 		return err
 	}
 
-	printResult(stdout, result, !o.noScan, scanReport)
+	if o.verbose {
+		printResult(stdout, result, !o.noScan, scanReport)
+	} else {
+		if result.InstallExitCode != 0 && installLog.Len() > 0 {
+			fmt.Fprintln(stdout, sectionRule)
+			fmt.Fprintln(stdout, "INSTALL LOG (install exited non-zero)")
+			fmt.Fprintln(stdout, sectionRule)
+			stdout.Write(installLog.Bytes())
+		}
+		printCompactReport(stdout, profile, result, !o.noScan, scanReport)
+	}
 
 	if o.failOnScan {
 		if n := highCriticalCount(scanReport); n > 0 {
-			return fmt.Errorf("static scan found %d high/critical finding(s) (--fail-on-scan set); see STATIC SCAN section above", n)
+			return fmt.Errorf("static scan found %d high/critical finding(s) (--fail-on-scan set); see the findings above", n)
 		}
 	}
 	return nil
@@ -318,6 +364,112 @@ func printScanSummaryLine(w io.Writer, scanned bool, scanReport analyze.Report) 
 	}
 	fmt.Fprintf(w, "static scan: %d finding(s) (%s); see STATIC SCAN section above\n",
 		len(scanReport.Findings), formatSeverityCounts(scanReport.Findings))
+}
+
+// printCompactReport is the default (non--verbose) "meguard run" output: a
+// one-line-per-stage status checklist, the top scan findings (see
+// printTopFindings in scan.go), and a single free-text RESULT line. It
+// intentionally omits the protections rationale and the raw install log
+// (printed separately, only on install failure) that --verbose keeps.
+func printCompactReport(w io.Writer, p sandbox.Profile, r sandbox.Result, scanned bool, report analyze.Report) {
+	netDesc := "network denied (--strict, no logs)"
+	if p.InspectEgress {
+		netDesc = "network inspected (fail-closed)"
+	}
+	fmt.Fprintf(w, "%s sandbox    %s, %s, ephemeral\n", glyphOK, p.Image, netDesc)
+
+	installGlyph := glyphOK
+	if r.InstallExitCode != 0 {
+		installGlyph = glyphBad
+	}
+	fmt.Fprintf(w, "%s install    %s (exit %d)\n", installGlyph, strings.Join(p.InstallCmd, " "), r.InstallExitCode)
+
+	highCrit := 0
+	if scanned {
+		highCrit = highCriticalCount(report)
+		scanGlyph := glyphOK
+		if highCrit > 0 {
+			scanGlyph = glyphWarn
+		}
+		fmt.Fprintf(w, "%s scan       %d finding(s) (%s) across %d files\n",
+			scanGlyph, len(report.Findings), formatSeverityCounts(report.Findings), report.FilesScanned)
+	} else {
+		fmt.Fprintln(w, "- scan       skipped (--no-scan)")
+	}
+
+	printCompactEgressLine(w, r)
+
+	fmt.Fprintf(w, "%s secrets    0 exposed (by construction: no host mounts, scratch HOME)\n", glyphOK)
+
+	if scanned {
+		printTopFindings(w, report.Findings, "meguard run -v")
+	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "RESULT: %s\n", summarizeCompactResult(r, scanned, highCrit))
+}
+
+// summarizeCompactResult is the single closing sentence of the compact
+// report: the same facts as the verbose RESULT section, condensed to what a
+// reader deciding whether to trust the repo actually needs.
+func summarizeCompactResult(r sandbox.Result, scanned bool, highCrit int) string {
+	var parts []string
+	if r.InstallExitCode == 0 {
+		parts = append(parts, "clean install")
+	} else {
+		parts = append(parts, fmt.Sprintf("install failed (exit %d)", r.InstallExitCode))
+	}
+	parts = append(parts, "0 secrets exposed")
+	if r.EgressInspected && !r.EgressReadFailed && len(r.Egress) > 0 {
+		parts = append(parts, fmt.Sprintf("%d egress attempt(s) blocked, none reached the network", len(r.Egress)))
+	} else {
+		parts = append(parts, "no egress reached the network")
+	}
+	summary := strings.Join(parts, ", ") + "."
+	if !scanned {
+		return summary
+	}
+	if highCrit > 0 {
+		return summary + fmt.Sprintf(" Review the %d high/critical finding(s) above before trusting this repo.", highCrit)
+	}
+	return summary + " No high/critical scan findings."
+}
+
+// printCompactEgressLine is the one-line egress summary for the status
+// checklist; printEgress (below) renders the full per-attempt list used by
+// --verbose.
+func printCompactEgressLine(w io.Writer, r sandbox.Result) {
+	switch {
+	case !r.EgressInspected:
+		fmt.Fprintf(w, "%s egress     denied (--network none, no logs)\n", glyphOK)
+	case r.EgressReadFailed:
+		fmt.Fprintf(w, "%s egress     inspected, but monitor output could not be read (containment still held; see stderr)\n", glyphWarn)
+	case len(r.Egress) == 0:
+		fmt.Fprintf(w, "%s egress     0 attempts observed, 0 reached the network\n", glyphOK)
+	default:
+		fmt.Fprintf(w, "%s egress     %d blocked (%s), 0 reached the network\n", glyphOK, len(r.Egress), egressDestSummary(r.Egress))
+	}
+}
+
+// egressDestSummary renders up to 3 distinct destinations from a blocked
+// egress list, plus a rollup count, so the checklist line stays one line
+// even when a repo made many attempts.
+func egressDestSummary(events []sandbox.EgressEvent) string {
+	const maxShown = 3
+	seen := map[string]bool{}
+	var dests []string
+	for _, e := range events {
+		if seen[e.Dest] {
+			continue
+		}
+		seen[e.Dest] = true
+		dests = append(dests, e.Dest)
+	}
+	if len(dests) > maxShown {
+		shown := dests[:maxShown]
+		return fmt.Sprintf("%s, +%d more", strings.Join(shown, ", "), len(dests)-maxShown)
+	}
+	return strings.Join(dests, ", ")
 }
 
 // printEgress renders the blocked-egress report. Nothing leaves the host in any

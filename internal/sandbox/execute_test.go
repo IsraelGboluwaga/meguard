@@ -1,6 +1,7 @@
 package sandbox_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -22,6 +23,7 @@ type fakeRunner struct {
 	execCode  int
 	execErr   error
 	execPanic bool
+	removeErr error
 
 	calls       []string
 	removeCalls int
@@ -64,7 +66,7 @@ func (f *fakeRunner) Exec(_ context.Context, _ string, cmd []string, _, _ io.Wri
 func (f *fakeRunner) Remove(_ context.Context, _ string) error {
 	f.calls = append(f.calls, "remove")
 	f.removeCalls++
-	return nil
+	return f.removeErr
 }
 
 func opts() sandbox.ExecuteOptions {
@@ -342,5 +344,62 @@ func TestExecuteNormalizesProfile(t *testing.T) {
 	}
 	if !reflect.DeepEqual(f.gotExecCmd, sandbox.DefaultInstallCmd()) {
 		t.Errorf("Exec got cmd %v, want default %v", f.gotExecCmd, sandbox.DefaultInstallCmd())
+	}
+}
+
+// A caller that discards Stdout/Stderr (e.g. to keep a clean install's log
+// out of a compact report) must still see a cleanup failure: it must be
+// routed to Diag, not lost inside the discarded Stderr.
+func TestExecuteCleanupFailureGoesToDiagNotStderr(t *testing.T) {
+	f := &fakeRunner{removeErr: errors.New("container busy")}
+	var stderr, diag bytes.Buffer
+	o := opts()
+	o.Stderr = &stderr
+	o.Diag = &diag
+	if _, err := sandbox.Execute(context.Background(), f, o); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("Stderr got %q, want empty (cleanup failure must not land here when Diag is set)", stderr.String())
+	}
+	if !strings.Contains(diag.String(), "cleanup failed") {
+		t.Errorf("Diag = %q, want it to mention the cleanup failure", diag.String())
+	}
+}
+
+// Same guarantee for an egress-monitor-read failure.
+func TestExecuteMonitorReadFailureGoesToDiagNotStderr(t *testing.T) {
+	f := &egressFakeRunner{collectErr: errors.New("logs unavailable")}
+	var stderr, diag bytes.Buffer
+	o := egressOpts()
+	o.Stderr = &stderr
+	o.Diag = &diag
+	res, err := sandbox.Execute(context.Background(), f, o)
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !res.EgressReadFailed {
+		t.Fatal("EgressReadFailed = false, want true")
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("Stderr got %q, want empty (monitor-read failure must not land here when Diag is set)", stderr.String())
+	}
+	if !strings.Contains(diag.String(), "could not read egress monitor") {
+		t.Errorf("Diag = %q, want it to mention the monitor read failure", diag.String())
+	}
+}
+
+// When Diag is unset, diagnostics fall back to Stderr, preserving the
+// pre-Diag behavior for any caller that has not opted in.
+func TestExecuteDiagFallsBackToStderrWhenUnset(t *testing.T) {
+	f := &fakeRunner{removeErr: errors.New("container busy")}
+	var stderr bytes.Buffer
+	o := opts()
+	o.Stderr = &stderr
+	if _, err := sandbox.Execute(context.Background(), f, o); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "cleanup failed") {
+		t.Errorf("Stderr = %q, want it to mention the cleanup failure (Diag unset)", stderr.String())
 	}
 }

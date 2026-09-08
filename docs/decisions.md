@@ -267,3 +267,81 @@ here.
   escalates when two or more DISTINCT weak signal categories land in the
   same file, and dedupe collapses repeated matches so one large file cannot
   flood the report.
+
+## 0017 - Compact-by-default CLI output; `-v`/`--verbose` for full detail
+
+- Decision: `meguard run` and `meguard scan` default to a COMPACT report: a
+  one-line header, a per-stage status checklist (`✓`/`!`/`✗` glyphs), a "Top
+  findings" block listing every High/Critical finding individually (capped
+  at 8, `maxTopFindings`) with everything else rolled into one "... N more"
+  line (grouped by analyzer, plus a "mostly `<dir>`/*" hint when one
+  directory dominates), and a single free-text `RESULT: ...` sentence. The
+  raw install log is captured but only printed if the install exited
+  non-zero. New `-v`/`--verbose` flag restores the exact previous output:
+  the `meguard: preparing locked-down sandbox` header with the full
+  active-protections prose, every finding listed individually with its
+  snippet, and the streamed install log.
+- Alternatives: keep the full report as the only output (rejected: a user
+  found it too verbose to read at a glance once a repo had several findings
+  and a long install log - not scannable by eye); make compact the only mode
+  with no way back to full detail (rejected: full detail is still needed to
+  debug a failed install or audit every finding, not just the High/Critical
+  ones). A few compact mockup shapes were tried before landing on the
+  status-checklist-plus-top-findings layout (a single summary line lost too
+  much; a table felt heavier than plain lines) as the most legible at a
+  glance.
+- Reason: Presentation only. Detection, containment, exit codes,
+  `--fail-on-scan`, and `--no-scan` behave identically in both modes; only
+  what gets printed changes. Keeping the exact old report behind `-v`
+  preserves it for anyone already relying on it (scripts scraping output,
+  existing habits) while making the default legible.
+- Follow-up correctness fix (found by the security-reviewer gate on this
+  change, before it landed): the compact implementation initially buffered
+  the install command's Stdout AND Stderr into one discardable
+  `bytes.Buffer`, only flushed on a non-zero exit or a hard error. But
+  `sandbox.Execute` also writes its OWN operational diagnostics (a `docker rm
+  -f` cleanup failure, an egress-monitor-read failure) to that same Stderr,
+  so on a successful install those diagnostics were silently discarded too -
+  exactly the case `printCompactEgressLine`'s "see stderr" message for a
+  monitor-read failure depends on. Fixed by adding a separate `Diag
+  io.Writer` field to `sandbox.ExecuteOptions` (falls back to `Stderr` when
+  unset, so this is additive) for meguard's own diagnostics only;
+  `cmd/run.go` always points `Diag` at the real stderr regardless of `-v` or
+  exit code, so only the install command's own stdio is ever buffered away.
+  New tests: `TestExecuteCleanupFailureGoesToDiagNotStderr`,
+  `TestExecuteMonitorReadFailureGoesToDiagNotStderr`,
+  `TestExecuteDiagFallsBackToStderrWhenUnset`.
+
+## 0018 - Entropy-only SVG exclusion, conditional on no `<script>` tag
+
+- Decision: exclude a `.svg` file from `entropy.go`'s long-line heuristic
+  only when it carries no `<script>` tag (`isSVGPath` in `walk.go` plus
+  `svgScriptTagRe` in `entropy.go`, alongside the existing
+  `isMinifiedOrVendorPath`). A script-carrying SVG loses the exclusion for
+  the whole file. `.svg` is deliberately NOT added to `proseExtensions`
+  either way, so `regex.go`'s signature checks (script tags, eval,
+  obfuscator fingerprints, exfil URLs, etc.) keep scanning ALL `.svg`
+  content unfiltered and at full severity regardless of this exclusion.
+- Alternatives: treat `.svg` as prose/inert like `.md` by adding it to
+  `proseExtensions` (rejected: SVG can execute via inline `<script>` and
+  `onload=`/`onclick=` handlers, a real XSS vector, so capping severity
+  across the board would hide a genuine threat class); exclude `.svg`
+  unconditionally by extension alone, with no content check (the first cut
+  of this fix; superseded by this decision after review pointed out it
+  would blind the entropy heuristic to a long, high-entropy payload
+  deliberately hidden inside an SVG's own `<script>` tag - a real gap, even
+  though `regex.go`'s signature checks would likely still catch a KNOWN
+  pattern in that script); leave `.svg` unexcluded everywhere (rejected: it
+  was one of the noisiest false positives found - a legitimate
+  `public/placeholder.svg`'s `path d="..."`/`viewBox` coordinate data was
+  flagged High, since it is naturally one long line that reads as
+  moderately-high-entropy without being an obfuscated payload).
+- Reason: the entropy heuristic's failure mode (long line, moderate entropy)
+  is specific to inert SVG coordinate data, not to SVG as a format, so the
+  fix is scoped exactly to that case. Gating on `<script>` presence keeps
+  the false-positive fix for ordinary icons while not creating a new blind
+  spot for the exact executable case the format is risky for; a
+  script-carrying SVG is also unusual enough on its own that scrutinizing
+  its other long lines too, not just the script, is the conservative
+  choice. New tests: `TestEntropyAnalyzerExcludesSVGPathData`,
+  `TestEntropyAnalyzerScansSVGWithScriptTag`.

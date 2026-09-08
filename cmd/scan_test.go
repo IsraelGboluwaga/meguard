@@ -111,7 +111,7 @@ func TestRunScanExitsNonZeroOnHighFinding(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	err := runScan(context.Background(), dir, &stdout, &stderr)
+	err := runScan(context.Background(), dir, true, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected a non-nil error for a High finding")
 	}
@@ -128,7 +128,55 @@ func TestRunScanCleanRepoSucceeds(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if err := runScan(context.Background(), dir, &stdout, &stderr); err != nil {
+	if err := runScan(context.Background(), dir, false, &stdout, &stderr); err != nil {
 		t.Errorf("expected a clean repo to succeed, got: %v", err)
+	}
+}
+
+// TestPrintCompactScanSectionSummarizesRatherThanListing checks the default
+// (non--verbose) scan report: it must show a status line and the pointer to
+// -v, but not dump every finding the way printScanSection does.
+func TestPrintCompactScanSectionSummarizesRatherThanListing(t *testing.T) {
+	report := analyze.Report{
+		FilesScanned: 5,
+		Findings: []analyze.Finding{
+			{Analyzer: "entropy", Category: "entropy", Severity: analyze.High, File: "a.ts", Line: 1, Message: "long line"},
+			{Analyzer: "entropy", Category: "entropy", Severity: analyze.Medium, File: "src/components/ui/x.tsx", Line: 1, Message: "long line"},
+			{Analyzer: "entropy", Category: "entropy", Severity: analyze.Medium, File: "src/components/ui/y.tsx", Line: 1, Message: "long line"},
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	printCompactScanSection(&stdout, &stderr, report)
+	out := stdout.String()
+	if !strings.Contains(out, "3 finding(s) (1 high, 2 medium)") {
+		t.Errorf("expected a compact status line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "HIGH") || !strings.Contains(out, "a.ts:1") {
+		t.Errorf("expected the High finding listed individually, got:\n%s", out)
+	}
+	if !strings.Contains(out, "... 2 more") || !strings.Contains(out, "meguard scan -v") {
+		t.Errorf("expected the remaining findings rolled up with a pointer to -v, got:\n%s", out)
+	}
+	if strings.Contains(out, "src/components/ui/x.tsx") {
+		t.Errorf("expected the rolled-up findings NOT to be listed individually, got:\n%s", out)
+	}
+}
+
+// TestRestHintMostlyOneDirectory checks the "mostly <dir>/*" hint fires only
+// when one directory accounts for a majority of the rolled-up findings, the
+// shape a UI component library's own long class-name strings produces.
+func TestRestHintMostlyOneDirectory(t *testing.T) {
+	rest := []analyze.Finding{
+		{Analyzer: "entropy", File: "src/components/ui/a.tsx"},
+		{Analyzer: "entropy", File: "src/components/ui/b.tsx"},
+		{Analyzer: "entropy", File: "src/components/ui/c.tsx"},
+		{Analyzer: "regex", File: "src/contexts/AuthContext.tsx"},
+	}
+	got := restHint(rest)
+	if !strings.Contains(got, "3 entropy") || !strings.Contains(got, "1 regex") {
+		t.Errorf("expected analyzer counts in hint, got %q", got)
+	}
+	if !strings.Contains(got, "mostly src/components/ui/*") {
+		t.Errorf("expected a majority-directory hint, got %q", got)
 	}
 }
