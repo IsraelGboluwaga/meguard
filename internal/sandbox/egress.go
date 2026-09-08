@@ -7,19 +7,25 @@ import (
 )
 
 // DefaultMonitorImage is the image used for the egress monitor sidecar. It must
-// provide ip (iproute2), iptables, and tcpdump. The monitor runs NO repo code;
-// it only stands up a sinkhole netns and captures packets. It is configurable
+// provide ip (iproute2), iptables, ip6tables, and a tcpdump built with NFLOG
+// capture support (nicolaka/netshoot satisfies all of these). The monitor runs
+// NO repo code; it only seals its netns and captures packets. It is configurable
 // so an operator can pin a trusted, locally cached image (see --monitor-image).
 const DefaultMonitorImage = "nicolaka/netshoot"
 
-// The sinkhole next-hop and its static neighbour. The monitor points the
-// default route at this address on a dummy interface and pins a fake L2 address
-// for it, so the kernel treats the next hop as resolved and actually TRANSMITS
-// the packet on the dummy device (where tcpdump captures it) instead of stalling
-// on ARP. The dummy device then discards the frame: nothing leaves the host.
+// The sinkhole next-hop and its static neighbour. A default route via this
+// next-hop on a dummy interface exists ONLY so that a connect() to an external
+// address produces a packet that reaches the OUTPUT chain (where it is logged
+// and dropped) instead of failing early with ENETUNREACH and leaving nothing to
+// log. The packet is never actually transmitted: the fail-closed OUTPUT DROP
+// policy discards it in-chain, after NFLOG has copied it for capture.
 const (
 	sinkholeNextHop = "10.255.255.2"
 	sinkholeLLAddr  = "02:00:00:00:00:01"
+	// nflogGroup is the netlink group iptables copies packets to and tcpdump
+	// reads from (tcpdump -i nflog:<group>). Capture happens IN the OUTPUT chain,
+	// before the DROP policy, so it is independent of the egress interface name.
+	nflogGroup = "30"
 )
 
 // EgressInspector is an OPTIONAL Runner capability. A Runner that also
@@ -104,38 +110,71 @@ func monitorCreateArgs(name string, p Profile) []string {
 	}
 }
 
-// monitorScript is the shell run inside the monitor. It neutralizes the real
-// uplink, installs a sinkhole default route on a dummy interface, adds a
-// belt-and-suspenders DROP on the real interface, redirects DNS to the sinkhole
-// so lookups are captured by name, prints a readiness marker, then execs
-// tcpdump to log every outbound SYN and DNS query. Because the default route
-// points at a dummy device, packets are transmitted (and captured) but
-// discarded by the device; nothing ever leaves the host.
+// monitorScript is the shell run inside the monitor. It seals the network
+// namespace FAIL-CLOSED and only then declares readiness:
 //
-// LIVE-VERIFICATION NOTE: the Go orchestration, argv, and parser are unit
-// tested, but this in-container netns setup must be verified once on a real
-// Linux Docker host. The reliable guarantee is TCP SYN capture to any IP:port
-// (the hardcoded-C2 case); DNS-name capture depends on the redirect below.
+//  1. It brings up a dummy sinkhole interface and points the default route at it,
+//     purely so connect() to an external address produces a packet that reaches
+//     the OUTPUT chain (rather than failing with ENETUNREACH and logging nothing).
+//  2. It forces ALL DNS (including Docker's embedded 127.0.0.11 resolver) to the
+//     sinkhole so a lookup is generated and logged but never forwarded upstream.
+//  3. It logs every non-loopback packet via NFLOG (non-terminating) and then
+//     sets the OUTPUT policy to DROP. The DROP policy, not an interface-specific
+//     rule, is what enforces no-egress, so it does NOT depend on the uplink being
+//     named eth0 and it cannot be bypassed by a route the script did not remove.
+//  4. It seals IPv6 the same way when an IPv6 stack is present.
+//  5. It VERIFIES the DROP policy and NFLOG rule actually applied, and only then
+//     prints the readiness marker. Every setup command runs WITHOUT `|| true` (set
+//     -e aborts on any failure), so a partial seal never prints the marker. The
+//     caller waits for that marker before creating the sandbox, so the sandbox is
+//     never created against an unsealed netns (fail closed).
+//
+// Capture (tcpdump on the nflog group) is best-effort and runs AFTER the seal is
+// verified: losing capture loses logs, never containment, because the DROP policy
+// already holds.
+//
+// LIVE-VERIFICATION NOTE: the Go orchestration, argv, and parser are unit tested,
+// and this script is now fail-closed by construction, but the in-container
+// netns/iptables/NFLOG behavior must still be verified once on a real Linux
+// Docker host (NFLOG needs the nfnetlink_log module; tcpdump must support
+// -i nflog:<group>).
 func monitorScript() string {
 	lines := []string{
 		"set -e",
-		"ip route del default 2>/dev/null || true",
+		// Sinkhole route so connect() generates a packet that traverses OUTPUT.
 		"ip link add sink0 type dummy",
 		"ip addr add 10.255.255.1/24 dev sink0",
 		"ip link set sink0 up",
 		"ip neigh replace " + sinkholeNextHop + " lladdr " + sinkholeLLAddr + " dev sink0 nud permanent",
+		// Removing a possibly-absent default route is the one optional step.
+		"ip route del default 2>/dev/null || true",
 		"ip route add default via " + sinkholeNextHop + " dev sink0",
-		// Nothing may ever leave via the real interface, even if a route reappeared.
-		"iptables -A OUTPUT -o eth0 -j DROP 2>/dev/null || true",
-		// Docker's embedded resolver lives on loopback (127.0.0.11) and NATs out
-		// the real interface; redirect DNS to the sinkhole so the query is
-		// transmitted on sink0 and captured by name instead of silently failing.
-		"iptables -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to-destination " + sinkholeNextHop + ":53 2>/dev/null || true",
-		"iptables -t nat -A OUTPUT -p tcp --dport 53 -j DNAT --to-destination " + sinkholeNextHop + ":53 2>/dev/null || true",
+		"ip -6 route del default 2>/dev/null || true",
+		// Force every DNS query (any destination, including 127.0.0.11) to the
+		// sinkhole so it is generated and logged but never forwarded.
+		"iptables -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to-destination " + sinkholeNextHop + ":53",
+		"iptables -t nat -A OUTPUT -p tcp --dport 53 -j DNAT --to-destination " + sinkholeNextHop + ":53",
+		// Fail-closed filter: accept loopback, log everything else, then DROP by
+		// policy. Interface-independent; no `|| true`, so any failure aborts.
+		"iptables -A OUTPUT -o lo -j ACCEPT",
+		"iptables -A OUTPUT -j NFLOG --nflog-group " + nflogGroup,
+		"iptables -P OUTPUT DROP",
+		// Seal IPv6 identically when the stack exists; if it does not, there is
+		// no v6 egress to seal.
+		"if [ -d /proc/sys/net/ipv6 ]; then",
+		"  ip6tables -A OUTPUT -o lo -j ACCEPT",
+		"  ip6tables -A OUTPUT -j NFLOG --nflog-group " + nflogGroup,
+		"  ip6tables -P OUTPUT DROP",
+		"fi",
+		// Verify the seal actually applied before declaring readiness. If either
+		// check fails, set -e aborts and the marker is never printed.
+		"iptables -S OUTPUT | grep -q '^-P OUTPUT DROP'",
+		"iptables -C OUTPUT -j NFLOG --nflog-group " + nflogGroup,
 		"echo " + monitorReadyMarker,
-		// -tt drops timestamps we do not need; -l line-buffers; -n avoids reverse
-		// lookups (which would themselves be egress). Capture SYNs and DNS.
-		"exec tcpdump -i sink0 -n -l 'tcp[tcpflags] & tcp-syn != 0 or udp port 53'",
+		// Capture in the OUTPUT chain via NFLOG (before the DROP), so every
+		// non-loopback packet is seen regardless of egress interface. -n avoids
+		// reverse lookups (which would themselves be egress); -l line-buffers.
+		"exec tcpdump -i nflog:" + nflogGroup + " -n -l",
 	}
 	return strings.Join(lines, "\n")
 }

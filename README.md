@@ -93,16 +93,17 @@ Only two values are ecosystem-specific: `--image` (default `node:20-slim`) and
 `--memory` and `--cpus` are conservative internal defaults (2g / 2 CPUs) that
 will become user-configurable; a large install may need more than 2g.
 
-### Inspecting blocked egress (`--inspect-egress`)
+### Inspecting blocked egress (`--inspect-egress`, experimental)
 
 By default `--network none` gives the container no network stack at all, so a
 malicious repo cannot phone home - but a blocked attempt also leaves nothing to
 report. `--inspect-egress` opts into a still-no-egress but OBSERVABLE mode: a
-hardened monitor sidecar seals a network namespace with no route out (only a
-logging sinkhole), the sandbox joins that namespace, and every outbound TCP
-connection attempt (to any IP:port, so hardcoded C2 addresses are caught too) and
-DNS lookup is logged and dropped. Nothing ever leaves the host; you just get to
-see what the repo tried:
+hardened monitor sidecar seals a network namespace **fail-closed** (the OUTPUT
+chain defaults to DROP, for IPv4 and IPv6, so containment does not depend on any
+one route or interface name), the sandbox joins that namespace, and every
+outbound connection attempt (to any IP:port, so hardcoded C2 addresses are caught
+too) plus every DNS lookup is logged via NFLOG and then dropped. You get to see
+what the repo tried:
 
     egress: 2 outbound attempt(s) BLOCKED (logged and dropped; none reached the network):
       - BLOCKED tcp 185.220.101.5:443
@@ -110,10 +111,18 @@ see what the repo tried:
 
 A clean run states "0 outbound attempts observed" explicitly - absence is stated,
 never silent. The monitor image defaults to `nicolaka/netshoot` and is
-overridable with `--monitor-image`; it must provide `ip`, `iptables`, and
-`tcpdump`. The sandbox itself gains no privileges - only the monitor (which runs
-no repo code) is granted the two network capabilities it needs. Egress inspection
-is off by default so the safest posture (no network stack) stays the default.
+overridable with `--monitor-image`; it must provide `ip`, `iptables`, `ip6tables`,
+and a `tcpdump` with NFLOG support. The sandbox itself gains no privileges - only
+the monitor (which runs no repo code) is granted the two network capabilities it
+needs, and `cap-drop ALL` means the sandbox cannot alter the seal.
+
+**Experimental / not yet live-verified.** The Go orchestration, the fail-closed
+ordering, and the parser are unit tested, but the in-container netns/iptables/NFLOG
+mechanics have not yet been verified on a live Linux Docker host (NFLOG needs the
+`nfnetlink_log` kernel module). Until that verification lands, treat
+`--inspect-egress` as experimental and keep the fully verified no-egress default
+(`--network none`) for anything you would not run without a proven seal. Egress
+inspection is off by default so the safest posture stays the default.
 
 ### Choosing a runtime (the trust boundary)
 

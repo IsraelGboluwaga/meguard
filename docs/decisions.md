@@ -164,3 +164,15 @@ here.
   (invariant 3). LIVE-VERIFICATION NOTE: the in-container netns/iptables script
   needs one verification pass on a Linux Docker host; the Go layers are unit
   tested.
+- Update (post security-review gate): the first cut sealed egress with an
+  interface-specific `iptables -A OUTPUT -o eth0 -j DROP` guarded by `|| true`,
+  handled no IPv6, and printed the readiness marker regardless of whether the
+  rule applied - a fail-OPEN gap. Hardened to fail-CLOSED: the seal is now an
+  OUTPUT DROP policy (interface-independent) for IPv4 and IPv6, DNS is forced to
+  the sinkhole, capture moved to NFLOG in-chain (before the drop), every critical
+  rule runs without `|| true`, and the script verifies the policy before echoing
+  readiness; `waitForMonitorReady` fails fast if the monitor exits first. The
+  feature is labeled experimental and its user-facing text no longer claims
+  unconditional containment until the live-verification pass lands. The
+  default-flip to make inspection the default (with a `--strict`/`--no-network`
+  opt-out) is PARKED until that verification passes.

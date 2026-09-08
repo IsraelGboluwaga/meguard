@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -98,6 +99,44 @@ func TestMonitorCreateArgsHardening(t *testing.T) {
 	}
 	if got[0] != "create" {
 		t.Errorf("first arg = %q, want create", got[0])
+	}
+}
+
+// TestMonitorScriptFailClosed asserts the monitor's seal is fail-closed: an
+// OUTPUT DROP policy for v4 and v6, NFLOG capture, DNS forced to the sinkhole,
+// a readiness verification before the marker, and NO `|| true` swallowing on the
+// critical sealing rules (only the two optional route-deletions may use it).
+func TestMonitorScriptFailClosed(t *testing.T) {
+	s := monitorScript()
+
+	for _, want := range []string{
+		"iptables -P OUTPUT DROP",              // fail-closed v4 policy
+		"ip6tables -P OUTPUT DROP",             // fail-closed v6 policy
+		"-j NFLOG --nflog-group " + nflogGroup, // capture in-chain before drop
+		"--dport 53 -j DNAT",                   // DNS forced to the sinkhole
+		"grep -q '^-P OUTPUT DROP'",            // readiness verifies the seal
+		"echo " + monitorReadyMarker,           // marker printed only after verification
+		"tcpdump -i nflog:" + nflogGroup,       // capture reads the nflog group
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("monitorScript missing fail-closed element %q\n%s", want, s)
+		}
+	}
+
+	// The marker must come AFTER the DROP policy and its verification.
+	if idxMarker, idxDrop := strings.Index(s, monitorReadyMarker), strings.Index(s, "iptables -P OUTPUT DROP"); idxMarker < idxDrop {
+		t.Errorf("readiness marker printed before the OUTPUT DROP policy is set")
+	}
+
+	// No critical sealing line may swallow failures. `|| true` is allowed only on
+	// the optional route-deletion lines.
+	for _, line := range strings.Split(s, "\n") {
+		if !strings.Contains(line, "|| true") {
+			continue
+		}
+		if !strings.Contains(line, "route del default") {
+			t.Errorf("critical sealing line must not use `|| true` (fail-open): %q", line)
+		}
 	}
 }
 

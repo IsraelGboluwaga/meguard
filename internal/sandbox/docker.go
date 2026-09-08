@@ -213,13 +213,21 @@ func (d DockerRunner) StartMonitor(ctx context.Context, p Profile) (string, erro
 }
 
 // waitForMonitorReady polls the monitor's logs until the readiness marker
-// appears (sinkhole installed) or the timeout elapses.
+// appears (the netns seal is verified in-container) or the timeout elapses. If
+// the monitor process exits before printing the marker, the seal script aborted
+// (fail closed): this is detected and reported immediately rather than waited
+// out, so a sandbox is never created against a monitor that failed to seal.
 func (d DockerRunner) waitForMonitorReady(ctx context.Context, name string) error {
 	deadline := time.Now().Add(monitorReadyTimeout)
 	for {
 		out, err := d.captureLogs(ctx, name)
 		if err == nil && strings.Contains(out, monitorReadyMarker) {
 			return nil
+		}
+		// Fail fast if the monitor already exited without sealing: the readiness
+		// marker will never come, so do not wait for the full timeout.
+		if d.containerExited(ctx, name) && !strings.Contains(out, monitorReadyMarker) {
+			return fmt.Errorf("egress monitor exited before sealing the network (fail closed): %s", strings.TrimSpace(out))
 		}
 		if time.Now().After(deadline) {
 			detail := strings.TrimSpace(out)
@@ -234,6 +242,20 @@ func (d DockerRunner) waitForMonitorReady(ctx context.Context, name string) erro
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// containerExited reports whether the named container is no longer running. It
+// is best-effort: on any inspect error it returns false so the caller falls back
+// to the readiness timeout rather than misreporting a live monitor as exited.
+func (d DockerRunner) containerExited(ctx context.Context, name string) bool {
+	var buf bytes.Buffer
+	cmd := exec.CommandContext(ctx, d.bin(), "inspect", "-f", "{{.State.Running}}", name)
+	cmd.Stdout = &buf
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+	return strings.TrimSpace(buf.String()) == "false"
 }
 
 // CollectEgress reads the monitor's captured output and returns the

@@ -84,6 +84,7 @@ type egressFakeRunner struct {
 	collectEvents  []sandbox.EgressEvent
 	collectErr     error
 	execCode       int
+	execPanic      bool
 	sawNetworkCont string // the NetworkContainer the sandbox was created with
 
 	calls   []string
@@ -122,6 +123,9 @@ func (f *egressFakeRunner) Start(_ context.Context, _ string) error {
 }
 func (f *egressFakeRunner) Exec(_ context.Context, _ string, _ []string, _, _ io.Writer) (int, error) {
 	f.calls = append(f.calls, "exec")
+	if f.execPanic {
+		panic("boom in egress exec")
+	}
 	return f.execCode, nil
 }
 func (f *egressFakeRunner) Remove(_ context.Context, id string) error {
@@ -197,6 +201,23 @@ func TestExecuteEgressCollectErrorIsNonFatal(t *testing.T) {
 	// Both containers still removed.
 	if len(f.removed) != 2 {
 		t.Errorf("removed %d containers, want 2", len(f.removed))
+	}
+}
+
+// INVARIANT 5, doubled surface: when the install panics under egress inspection,
+// BOTH the sandbox and the monitor must still be force-removed.
+func TestExecuteEgressRemovesBothOnPanic(t *testing.T) {
+	f := &egressFakeRunner{execPanic: true}
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_, _ = sandbox.Execute(context.Background(), f, egressOpts())
+	}()
+	if recovered == nil {
+		t.Fatal("expected the panic to propagate through Execute")
+	}
+	if len(f.removed) != 2 {
+		t.Errorf("removed %d containers on panic, want 2 (sandbox + monitor)", len(f.removed))
 	}
 }
 

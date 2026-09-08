@@ -26,10 +26,22 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   NET_ADMIN/NET_RAW and runs no repo code. Egress inspection rides on an OPTIONAL
   `EgressInspector` interface, so the core `Runner` is unchanged and the default
   path never touches the monitor code.
-  - LIVE-VERIFICATION NOTE: the Go orchestration, argv, output, and tcpdump
-    parser are unit tested; the in-container netns/iptables setup still needs one
-    verification pass on a real Linux Docker host. The reliable guarantee is TCP
-    SYN capture; DNS-name capture depends on the resolver redirect.
+  - Fail-closed sealing (hardened after a security review): the monitor sets the
+    OUTPUT policy to DROP for IPv4 and IPv6 (interface-independent, so it no
+    longer depends on the uplink being named `eth0`), logs via NFLOG in-chain
+    before the drop, forces all DNS (incl. Docker's embedded `127.0.0.11`) to the
+    sinkhole, runs every critical rule without `|| true`, and verifies the policy
+    applied before printing the readiness marker. `waitForMonitorReady` also
+    fails fast if the monitor exits before sealing. So a partial or failed seal
+    can never reach the sandbox-create step.
+  - Marked EXPERIMENTAL and not over-claimed: the pre-run notice, result line,
+    and README state the guarantee level and that the in-container mechanics are
+    not yet verified on a live Linux Docker host, instead of an unconditional
+    "nothing leaves the host".
+  - LIVE-VERIFICATION NOTE: the Go orchestration, argv, output, parser, and
+    fail-closed ordering are unit tested; the in-container netns/iptables/NFLOG
+    behavior still needs one verification pass on a real Linux Docker host (NFLOG
+    needs `nfnetlink_log`; tcpdump must support `-i nflog:<group>`).
 - `--runtime` flag on `meguard run`: selects the Docker-compatible CLI that
   enforces the sandbox (default `docker`; e.g. `--runtime podman` for a rootless
   runtime). The daemon is the trust boundary, so a rootless runtime shrinks the

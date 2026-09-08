@@ -61,7 +61,7 @@ unprivileged user rather than host root.`,
 	// Egress inspection RELAXES --network none into a monitored, egress-dropped
 	// network stack so blocked connection attempts are reported. Still no egress:
 	// the monitor logs and drops. Default off keeps the safest posture.
-	cmd.Flags().BoolVar(&inspectEgress, "inspect-egress", false, "log outbound connection attempts (still blocked); requires a monitor image with ip/iptables/tcpdump")
+	cmd.Flags().BoolVar(&inspectEgress, "inspect-egress", false, "[experimental] log outbound connection attempts (still blocked); requires a monitor image with ip/iptables/tcpdump+NFLOG. Not yet verified on a live Linux host")
 	cmd.Flags().StringVar(&monitorImage, "monitor-image", "", "image for the egress monitor sidecar (default nicolaka/netshoot; must provide ip, iptables, tcpdump)")
 	return cmd
 }
@@ -196,7 +196,8 @@ func printPreRunNotice(w io.Writer, source, runtimeBin string, p sandbox.Profile
 	fmt.Fprintln(w, "  - repo code NEVER runs on the host (git clone only; all execution in-container)")
 	fmt.Fprintln(w, "  - NO host $HOME and NO repo bind mounts (repo is copied into a container tmpfs)")
 	if p.InspectEgress {
-		fmt.Fprintf(w, "  - network INSPECTED via monitor sidecar (%s): every outbound attempt is LOGGED and DROPPED, none leaves the host\n", p.MonitorImageOrDefault())
+		fmt.Fprintf(w, "  - network INSPECTED via monitor sidecar (%s): the netns is sealed fail-closed (OUTPUT DROP), every outbound attempt is logged then dropped\n", p.MonitorImageOrDefault())
+		fmt.Fprintln(w, "    [experimental] egress inspection is not yet verified on a live Linux Docker host; the fully verified no-egress mode is the default (--network none, no --inspect-egress)")
 	} else {
 		fmt.Fprintln(w, "  - network DENIED (--network none, no egress)")
 	}
@@ -208,7 +209,11 @@ func printResult(w io.Writer, r sandbox.Result) {
 	fmt.Fprintln(w, "RESULT")
 	fmt.Fprintln(w, sectionRule)
 	fmt.Fprintf(w, "install exit code: %d\n", r.InstallExitCode)
-	fmt.Fprintln(w, "0 host secrets exposed (by construction: no host mounts, scratch HOME, no network)")
+	if r.EgressInspected {
+		fmt.Fprintln(w, "0 host secrets exposed (by construction: no host mounts, scratch HOME; egress sealed fail-closed and logged)")
+	} else {
+		fmt.Fprintln(w, "0 host secrets exposed (by construction: no host mounts, scratch HOME, no network)")
+	}
 	printEgress(w, r)
 }
 

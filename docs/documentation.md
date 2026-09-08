@@ -137,19 +137,28 @@ sidecar whose network namespace the sandbox joins:
 1. `StartMonitor` creates a hardened monitor container (`--cap-drop ALL` then
    only `--cap-add NET_ADMIN` `--cap-add NET_RAW`, `no-new-privileges`,
    `--read-only`, resource caps). It runs NO repo code.
-2. The monitor's shell (`monitorScript`) seals its netns: it deletes the real
-   default route, brings up a dummy `sink0` interface with a pinned next-hop
-   neighbour, points the default route at that sinkhole, adds a
-   belt-and-suspenders `iptables -A OUTPUT -o eth0 -j DROP`, and redirects DNS
-   (`iptables -t nat ... DNAT`) to the sinkhole so lookups are captured by name.
-   It prints a readiness marker, then execs
-   `tcpdump -i sink0 -n -l 'tcp[tcpflags] & tcp-syn != 0 or udp port 53'`.
-   Because the default route points at a dummy device, packets are transmitted
-   (and captured) but discarded; nothing leaves the host.
+2. The monitor's shell (`monitorScript`) seals its netns FAIL-CLOSED. It brings
+   up a dummy `sink0` interface and points the default route at it so a
+   `connect()` to an external address still produces a packet that reaches the
+   OUTPUT chain (instead of failing with ENETUNREACH and logging nothing). It
+   forces all DNS (any destination, including Docker's embedded `127.0.0.11`) to
+   the sinkhole via `iptables -t nat ... DNAT`. Then, in the filter table, it
+   accepts loopback, logs everything else via `NFLOG`, and sets the OUTPUT
+   policy to DROP - for IPv4 and, when an IPv6 stack is present, IPv6. The DROP
+   POLICY (not an interface-specific rule) is what enforces no-egress, so
+   containment does not depend on the uplink being named `eth0` or on any single
+   route the script removed. Every setup command runs WITHOUT `|| true`, so under
+   `set -e` any failure aborts the script before the readiness marker; the script
+   also explicitly verifies the DROP policy and NFLOG rule applied before echoing
+   the marker. It then execs `tcpdump -i nflog:<group> -n -l`, which captures IN
+   the OUTPUT chain (before the drop), independent of egress interface.
 3. `Execute` waits for the readiness marker (`waitForMonitorReady`) BEFORE
-   creating the sandbox. If it never arrives, the monitor is removed and the run
-   fails closed: the sandbox is never created, so it can never join an unsealed
-   netns.
+   creating the sandbox. If it never arrives, or if the monitor process EXITS
+   before printing it (a fail-closed abort, detected via `containerExited` so it
+   is reported immediately rather than waited out), the monitor is removed and
+   the run fails: the sandbox is never created, so it can never join an unsealed
+   netns. Capture (tcpdump) runs only after the seal is verified, so losing
+   capture loses logs, never containment.
 4. The sandbox is created with `--network container:<monitor>` (the ONE
    conditional flag in `createArgs`, via `networkArgs`) and every other
    hardening flag unchanged. It joins the netns but gains NO capability; the
@@ -170,11 +179,14 @@ silence; an unreadable monitor says so and never claims zero. The monitor image
 is `nicolaka/netshoot` by default and overridable with `--monitor-image`; it must
 provide `ip` (iproute2), `iptables`, and `tcpdump`.
 
-LIVE-VERIFICATION NOTE: the Go orchestration, argv, output, and `parseEgress`
-are unit tested. The in-container netns/iptables setup in `monitorScript` still
-needs one verification pass on a real Linux Docker host. The reliable guarantee
-is TCP SYN capture to any IP:port (the hardcoded-C2 case); DNS-name capture
-depends on the resolver redirect working against the runtime's embedded DNS.
+LIVE-VERIFICATION NOTE: the Go orchestration, argv, output, `parseEgress`, and
+the fail-closed ordering are unit tested, and the seal is now fail-closed by
+construction (OUTPUT DROP policy for v4+v6, verified before readiness, no
+`|| true` on any critical rule). The in-container netns/iptables/NFLOG behavior
+must still be verified once on a real Linux Docker host: NFLOG needs the
+`nfnetlink_log` kernel module, and `tcpdump` must support `-i nflog:<group>`.
+Until that pass lands, `--inspect-egress` is documented as experimental and the
+fully verified no-egress mode (`--network none`) remains the default.
 
 ## Hardening flags and the door each closes
 
