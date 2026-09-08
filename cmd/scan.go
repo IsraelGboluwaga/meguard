@@ -57,14 +57,22 @@ func runScan(ctx context.Context, source string, verbose bool, stdout, stderr io
 	}
 	defer cleanup()
 
+	var sp *spinner
 	if verbose {
 		fmt.Fprintln(stdout, "meguard: static scan (no container; repo code is never executed)")
 		fmt.Fprintf(stdout, "  source: %s\n", source)
 	} else {
-		fmt.Fprintf(stdout, "meguard scan %s (no container; read-only)\n\n", source)
+		fmt.Fprintln(stdout, "meguard scan (no container; read-only)")
+		fmt.Fprintln(stdout)
+		// Compact scan prints nothing until the walk finishes, which looks
+		// frozen on a large repo. A spinner on stderr fills the gap; it is
+		// inert on a non-terminal stderr.
+		sp = newSpinner(stderr)
 	}
 
+	sp.start("scanning repo for hidden code")
 	report, err := analyze.Scan(repoDir)
+	sp.stop()
 	if err != nil {
 		return fmt.Errorf("scan: %w", err)
 	}

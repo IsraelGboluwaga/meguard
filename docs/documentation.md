@@ -469,15 +469,25 @@ scan must never be able to weaken it), not the CLI layer above it.
 
 ### Output verbosity
 
-Both `run` and `scan` default to a COMPACT report: a one-line header, a
-per-stage status checklist (`✓`/`!`/`✗` glyphs), only the High/Critical
-findings listed individually in a "Top findings" block (capped at
-`maxTopFindings` = 8, with everything else rolled into one "... N more" line
-grouped by analyzer, plus a "mostly `<dir>`/*" hint when one directory
-accounts for most of the rest), and a single free-text `RESULT: ...`
-sentence. The raw install log (`run` only) is captured but not printed unless
-the install exited non-zero, in which case it is dumped under an `INSTALL LOG
-(install exited non-zero)` section.
+Both `run` and `scan` default to a COMPACT report: a per-stage status
+checklist (`✓`/`!`/`✗` glyphs), only the High/Critical findings listed
+individually in a "Top findings" block (capped at `maxTopFindings` = 8, with
+everything else rolled into one "... N more" line grouped by analyzer, plus a
+"mostly `<dir>`/*" hint when one directory accounts for most of the rest), and
+a single free-text `RESULT: ...` sentence. `run` no longer echoes the invoked
+`meguard run <source>` command as a header line (it is redundant with what the
+user typed); `scan`'s only header is the fixed `meguard scan (no container;
+read-only)` mode line. The raw install log (`run` only) is captured but not
+printed unless the install exited non-zero, in which case it is dumped under
+an `INSTALL LOG (install exited non-zero)` section.
+
+While the slow, otherwise-silent stages run (the static scan, and, for `run`,
+the in-container install) a spinner animates a single in-place line on stderr
+so the compact path never looks frozen (`cmd/spinner.go`). It is a no-op when
+stderr is not a terminal (character-device detection via `os.File.Stat`, so
+the run binary stays cgo-free with no external terminal dependency), keeping
+piped/redirected output clean, and it is not allocated in `-v`/`--verbose`
+mode, which streams its own live output. Frames are plain ASCII by house rule.
 
 `-v`/`--verbose` (both commands) restores the exact previous, full-detail
 report: the `meguard: preparing locked-down sandbox` header with the full
@@ -491,7 +501,9 @@ rendering lives in `printCompactReport`/`printCompactEgressLine`/
 `summarizeCompactResult` (`cmd/run.go`) and `printCompactScanSection`/
 `printTopFindings`/`restHint` (`cmd/scan.go`); the pre-existing full-detail
 rendering (`printPreRunNotice`/`printScanSection`/`printResult`) is unchanged
-and now only runs under `-v`.
+and now only runs under `-v`. The spinner (`newSpinner`/`start`/`setLabel`/
+`stop` in `cmd/spinner.go`) writes only to stderr, so it never touches the
+report on stdout in either mode.
 
 ## Upgrade paths summary
 

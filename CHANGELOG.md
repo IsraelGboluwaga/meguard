@@ -8,7 +8,23 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ## [Unreleased]
 
+### Added
+
+- Progress spinner on the compact (non--verbose) `meguard run` and
+  `meguard scan` paths (`cmd/spinner.go`). The slow, previously silent stages
+  (the static scan, and the in-container install) now animate a single
+  in-place line on stderr so the tool no longer looks frozen while it works.
+  It is inert when stderr is not a terminal (piped or redirected output stays
+  clean) and unused in `-v`/`--verbose` mode, which streams its own live
+  output. Frames are plain ASCII; the run binary stays cgo-free (terminal
+  detection uses `os.File.Stat`, no external dependency).
+
 ### Changed
+
+- Compact `meguard run` no longer echoes the invoked `meguard run <source>`
+  command back as a header line (the user already typed it). Compact
+  `meguard scan` likewise drops the repeated source path; its header is now
+  just `meguard scan (no container; read-only)`. Verbose output is unchanged.
 
 - `meguard run` and `meguard scan` default output is now COMPACT instead of
   the previous full detail: a one-line header, a per-stage status checklist

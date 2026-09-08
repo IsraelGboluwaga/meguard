@@ -345,3 +345,35 @@ here.
   its other long lines too, not just the script, is the conservative
   choice. New tests: `TestEntropyAnalyzerExcludesSVGPathData`,
   `TestEntropyAnalyzerScansSVGWithScriptTag`.
+
+## 0019 - Progress spinner on stderr; drop the compact command echo
+
+- Decision: on the compact (non--verbose) path, animate a single in-place
+  spinner line on stderr while the slow, otherwise-silent stages run (the
+  static scan, and, for `run`, the in-container install), and remove the
+  redundant `meguard run <source>` header line (compact `scan`'s header is
+  reduced to the fixed `meguard scan (no container; read-only)` mode line,
+  dropping the repeated source path). The spinner lives in `cmd/spinner.go`
+  and is a no-op when stderr is not a terminal.
+- Alternatives: a full progress bar or per-stage timing (rejected: the stages
+  are coarse and their durations unknown up front - a spinner conveys
+  "working" without implying a measurable percentage); print static "scanning
+  ..."/"installing ..." lines with no animation (rejected: on a multi-second
+  install with no output they still read as frozen; an animation is the signal
+  that the process is alive); write the spinner to stdout (rejected: stdout
+  carries the machine-relevant report, and a spinner's carriage returns would
+  corrupt it when piped - stderr is the correct channel for progress chrome);
+  add `golang.org/x/term` for terminal detection (rejected: the run binary
+  must stay cgo-free and dependency-light, and `os.File.Stat`'s
+  `ModeCharDevice` check is sufficient on the supported platforms); keep
+  echoing the invoked command (rejected: the user just typed it, so it is
+  pure noise in the compact view).
+- Reason: the compact default made the tool look frozen during the exact
+  stages it exists to run, because they print nothing until they finish;
+  the freeze was the top piece of feedback. Confining the animation to stderr
+  and making it inert on non-terminals keeps piped output byte-for-byte clean
+  and the report on stdout untouched, so this is presentation only - detection,
+  containment, exit codes, and every flag behave identically. Terminal
+  detection via `os.File.Stat` avoids any new dependency and keeps the run
+  binary cgo-free. New tests: `TestSpinnerNoOpOnNonTerminal`,
+  `TestNilSpinnerIsSafe`, `TestSpinnerLifecycleIsSafe`.
