@@ -50,6 +50,12 @@ var skipDirNames = map[string]bool{
 	".eggs":         true,
 	".mypy_cache":   true,
 	".pytest_cache": true,
+	// meguard's own two-phase prefetch cache (sandbox.CacheDirName). When `run`
+	// prefetches, it lives inside the staged repo dir the scan walks; it holds
+	// npm's compressed package blobs, which are inert here and only add noise and
+	// entropy false positives. The literal is duplicated rather than imported to
+	// keep internal/analyze free of any dependency on internal/sandbox.
+	".meguard-cache": true,
 }
 
 // isGeneratedMetadataDir reports whether name is a Python packaging metadata

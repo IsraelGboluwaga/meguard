@@ -112,3 +112,49 @@ func TestCreateArgsRelaxationsApply(t *testing.T) {
 		t.Errorf("image not applied: tail = %v", got[len(got)-3:])
 	}
 }
+
+// TestPrefetchCreateArgsHardening asserts the PREFETCH container keeps every
+// unconditional hardening flag the sealed sandbox has, and differs ONLY by
+// having a bridge network instead of --network none (it must reach the
+// registry). It runs no repo code (--ignore-scripts), which is what makes the
+// single networked container safe.
+func TestPrefetchCreateArgsHardening(t *testing.T) {
+	got := prefetchCreateArgs("meguard-prefetch-test", Profile{})
+
+	// Same non-network hardening as the sealed sandbox.
+	requiredPairs := [][]string{
+		{"--user", "1000:1000"},
+		{"--cap-drop", "ALL"},
+		{"--security-opt", "no-new-privileges"},
+		{"--read-only"},
+		{"--tmpfs", "/repo:exec,mode=1777"},
+		{"--tmpfs", "/home/sandbox"},
+		{"--tmpfs", "/tmp"},
+		{"--pids-limit", "512"},
+		{"--memory", "2g"},
+		{"--cpus", "2"},
+		{"-w", "/repo"},
+		{"-e", "HOME=/home/sandbox"},
+	}
+	for _, want := range requiredPairs {
+		if !containsSeq(got, want) {
+			t.Errorf("prefetchCreateArgs is missing required hardening flag %v\n  got: %v", want, got)
+		}
+	}
+
+	// The prefetch container is the ONE that gets a network, and it must be a
+	// real bridge, never the sealed --network none (which cannot reach a
+	// registry) and never a monitor netns.
+	if !containsSeq(got, []string{"--network", "bridge"}) {
+		t.Errorf("prefetchCreateArgs must use --network bridge: %v", got)
+	}
+	if containsSeq(got, []string{"--network", "none"}) {
+		t.Errorf("prefetchCreateArgs must NOT use --network none: %v", got)
+	}
+
+	// Image + keep-alive command remain the tail.
+	tail := got[len(got)-3:]
+	if !containsSeq(tail, []string{DefaultImage, "sleep", "infinity"}) {
+		t.Errorf("prefetch argv tail = %v, want [%s sleep infinity]", tail, DefaultImage)
+	}
+}

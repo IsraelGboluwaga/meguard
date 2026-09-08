@@ -62,7 +62,20 @@ type ExecuteOptions struct {
 	// never silently lost regardless of whether the install itself
 	// succeeded.
 	Diag io.Writer
+
+	// InstallTimeout bounds ONLY the install command's execution (create, start,
+	// and copy are fast and stay on the parent ctx). Zero means no timeout. When
+	// it elapses the install exec is cancelled, the run returns ErrInstallTimeout,
+	// and cleanup still force-removes every container via the deferred detached
+	// Remove. This is the ceiling that keeps a hostile or hung lifecycle script
+	// (a real one now runs in-box under the two-phase offline install) from
+	// stalling meguard indefinitely.
+	InstallTimeout time.Duration
 }
+
+// ErrInstallTimeout is returned by Execute when the install command exceeds
+// ExecuteOptions.InstallTimeout. Containment is unaffected: cleanup still runs.
+var ErrInstallTimeout = errors.New("install command timed out")
 
 // diag returns where to write meguard's own operational diagnostics: Diag if
 // set, else Stderr (preserving the old behavior for any caller that has not
@@ -138,8 +151,23 @@ func Execute(ctx context.Context, r Runner, opts ExecuteOptions) (result Result,
 		return Result{}, fmt.Errorf("copy repo into sandbox: %w", err)
 	}
 
-	code, err := r.Exec(ctx, id, p.InstallCmd, opts.Stdout, opts.Stderr)
+	// Bound ONLY the install exec with InstallTimeout (if set); create/start/copy
+	// stay on the parent ctx. A cancelled execCtx kills the docker exec but not
+	// the deferred detached Remove, so cleanup still runs.
+	execCtx := ctx
+	if opts.InstallTimeout > 0 {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(ctx, opts.InstallTimeout)
+		defer cancel()
+	}
+	code, err := r.Exec(execCtx, id, p.InstallCmd, opts.Stdout, opts.Stderr)
 	if err != nil {
+		// Distinguish "we cancelled the install for exceeding InstallTimeout"
+		// from a genuine runner failure: only the former is a timeout, and only
+		// when the PARENT ctx is still live (a real Ctrl-C also cancels execCtx).
+		if opts.InstallTimeout > 0 && errors.Is(execCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return Result{}, fmt.Errorf("%w after %s", ErrInstallTimeout, opts.InstallTimeout)
+		}
 		return Result{}, fmt.Errorf("run install command: %w", err)
 	}
 

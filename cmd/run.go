@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/IsraelGboluwaga/meguard/internal/analyze"
 	"github.com/IsraelGboluwaga/meguard/internal/sandbox"
@@ -27,6 +28,8 @@ func newRunCmd() *cobra.Command {
 	var noScan bool
 	var failOnScan bool
 	var verbose bool
+	var noPrefetch bool
+	var installTimeout time.Duration
 
 	cmd := &cobra.Command{
 		Use:   "run <repo-url-or-path>",
@@ -62,6 +65,8 @@ unprivileged user rather than host root.`,
 				noScan:       noScan,
 				failOnScan:   failOnScan,
 				verbose:      verbose,
+				noPrefetch:   noPrefetch,
+				timeout:      installTimeout,
 			}, c.OutOrStdout(), c.ErrOrStderr())
 		},
 	}
@@ -93,6 +98,18 @@ unprivileged user rather than host root.`,
 	// repo is worth trusting, without the full protections prose, every
 	// finding, and the raw install log. --verbose restores that full detail.
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "print full detail: protections rationale, every scan finding, and the raw install log")
+	// Two-phase install (node only): by default meguard prefetches the dependency
+	// tree with `npm install --ignore-scripts` inside a hardened, networked,
+	// no-host-mount container (runs NO repo code), then installs OFFLINE inside the
+	// sealed sandbox so dependency postinstall payloads actually run and their
+	// blocked egress is observed. --no-prefetch keeps the single-phase behavior
+	// (sandbox has no network, so a networked install fails fast; only the repo's
+	// own root scripts run).
+	cmd.Flags().BoolVar(&noPrefetch, "no-prefetch", false, "skip the containerized dependency prefetch; run single-phase (node install then has no network, so dependency scripts never run)")
+	// The install command runs real, possibly hostile lifecycle scripts in the
+	// box; bound it so a hung or spinning script cannot stall meguard. Applies to
+	// both the prefetch and the in-sandbox install. 0 disables the timeout.
+	cmd.Flags().DurationVar(&installTimeout, "timeout", 2*time.Minute, "max duration for the dependency prefetch and for the in-sandbox install command (0 disables)")
 	return cmd
 }
 
@@ -108,6 +125,8 @@ type runOptions struct {
 	noScan       bool
 	failOnScan   bool
 	verbose      bool
+	noPrefetch   bool
+	timeout      time.Duration
 }
 
 func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) error {
@@ -128,7 +147,7 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 		return err
 	}
 
-	repoDir, cleanup, err := resolveRepo(ctx, o.source, stderr)
+	repoDir, owned, cleanup, err := resolveRepo(ctx, o.source, stderr)
 	if err != nil {
 		return err
 	}
@@ -144,8 +163,10 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 	}
 	// docker exec runs without a shell, so splitting on whitespace is the right
 	// tokenization. Quoted arguments are not supported yet (documented).
+	userSetCmd := false
 	if fields := strings.Fields(o.installCmd); len(fields) > 0 {
 		profile.InstallCmd = fields
+		userSetCmd = true
 	}
 
 	// Auto-detect the ecosystem from the repo's manifests and fill any field the
@@ -154,18 +175,55 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 	// cannot weaken the sandbox. Detection reads file existence only and runs no
 	// repo code.
 	ecosystem := "unknown (using locked-down defaults)"
-	if eco, ok := sandbox.DetectEcosystem(repoDir); ok {
+	eco, ecoOK := sandbox.DetectEcosystem(repoDir)
+	if ecoOK {
 		ecosystem = eco.Name
 		if profile.Image == "" {
 			profile.Image = eco.Image
 		}
-		if len(profile.InstallCmd) == 0 {
+	}
+
+	// Decide the two-phase (offline) install. Prefetch is attempted only when the
+	// ecosystem defines a containerized, no-code-execution fetch (node today), the
+	// user did not override --cmd, and --no-prefetch was not passed. When it will
+	// run, the sandbox install is the OFFLINE form so a full dependency tree is
+	// built with the network sealed and every lifecycle script runs in the box;
+	// otherwise the ecosystem's single-phase (fail-fast) install is used. A user
+	// --cmd always wins over both.
+	willPrefetch := ecoOK && !o.noPrefetch && !userSetCmd && len(eco.PrefetchCmd) > 0
+	if !userSetCmd && len(profile.InstallCmd) == 0 && ecoOK {
+		if willPrefetch {
+			profile.InstallCmd = eco.OfflineInstallCmd
+		} else {
 			profile.InstallCmd = eco.InstallCmd
 		}
 	}
 
 	if o.verbose {
 		printPreRunNotice(stdout, o.source, o.runtimeBin, ecosystem, profile.Normalize())
+	}
+
+	// Two-phase leg 1: containerized prefetch (node). Stage an unowned (user's own)
+	// repo into a copy first so meguard never writes the cache into the user's
+	// tree. Prefetch runs no repo code (invariant 1); on any failure it falls back
+	// to the single-phase install, still fully contained.
+	prefetch := prefetchOutcome{Detail: "not applicable"}
+	if willPrefetch {
+		staged, stageCleanup, stageErr := stageForMutation(repoDir, owned)
+		if stageErr != nil {
+			fmt.Fprintf(stderr, "meguard: %v; falling back to single-phase install\n", stageErr)
+			profile.InstallCmd = eco.InstallCmd
+			prefetch = prefetchOutcome{Attempted: true, OK: false, Detail: "staging failed; single-phase"}
+		} else {
+			defer stageCleanup()
+			repoDir = staged
+			sp.start("prefetching dependencies in a networked, no-host-mount container (no scripts run)")
+			prefetch = runPrefetch(ctx, runner, eco, repoDir, o.timeout, stderr)
+			sp.stop()
+			if !prefetch.OK {
+				profile.InstallCmd = eco.InstallCmd
+			}
+		}
 	}
 
 	// Static scan runs on the host, read-only, before any container work:
@@ -216,7 +274,8 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 		// failures) must never be silently lost inside installLog just
 		// because the install itself succeeded. Only the install command's
 		// own stdio (Stdout/Stderr above) is ever buffered away.
-		Diag: stderr,
+		Diag:           stderr,
+		InstallTimeout: o.timeout,
 	})
 	// Default (inspected) mode is experimental and needs a monitor image + NFLOG.
 	// If the monitor cannot start, fall back to the fully verified --network none
@@ -231,11 +290,12 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 		profile.InspectEgress = false
 		sp.start(fmt.Sprintf("running %s in locked-down sandbox (%s)", strings.Join(profile.InstallCmd, " "), profile.Image))
 		result, err = sandbox.Execute(ctx, runner, sandbox.ExecuteOptions{
-			RepoDir: repoDir,
-			Profile: profile,
-			Stdout:  instStdout,
-			Stderr:  instStderr,
-			Diag:    stderr,
+			RepoDir:        repoDir,
+			Profile:        profile,
+			Stdout:         instStdout,
+			Stderr:         instStderr,
+			Diag:           stderr,
+			InstallTimeout: o.timeout,
 		})
 	}
 	sp.stop()
@@ -256,7 +316,7 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 			fmt.Fprintln(stdout, sectionRule)
 			stdout.Write(installLog.Bytes())
 		}
-		printCompactReport(stdout, profile, result, !o.noScan, scanReport)
+		printCompactReport(stdout, profile, result, prefetch, !o.noScan, scanReport)
 	}
 
 	if o.failOnScan {
@@ -271,15 +331,20 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 // function. A git URL is cloned to a temp dir that is always removed; a local
 // path is used in place with a no-op cleanup.
 //
+// The returned owned flag reports whether repoDir is a directory meguard created
+// and may freely mutate (a clone temp: owned=true) versus the user's own working
+// tree used in place (owned=false). The two-phase prefetch writes into the repo
+// dir, so an unowned dir must be staged into a copy first (see stageForMutation).
+//
 // SAFETY: git clone does NOT run repo install hooks, so it is safe to run on the
 // host. All repo EXECUTION happens later, only inside the container.
-func resolveRepo(ctx context.Context, source string, stderr io.Writer) (string, func(), error) {
+func resolveRepo(ctx context.Context, source string, stderr io.Writer) (repoDir string, owned bool, cleanup func(), err error) {
 	noop := func() {}
 
 	if isGitURL(source) {
 		dir, err := os.MkdirTemp("", "meguard-clone-")
 		if err != nil {
-			return "", noop, fmt.Errorf("create temp clone dir: %w", err)
+			return "", false, noop, fmt.Errorf("create temp clone dir: %w", err)
 		}
 		cleanup := func() { _ = os.RemoveAll(dir) }
 
@@ -293,23 +358,23 @@ func resolveRepo(ctx context.Context, source string, stderr io.Writer) (string, 
 		gc.Stderr = stderr
 		if err := gc.Run(); err != nil {
 			cleanup()
-			return "", noop, fmt.Errorf("git clone %s: %w", source, err)
+			return "", false, noop, fmt.Errorf("git clone %s: %w", source, err)
 		}
-		return dir, cleanup, nil
+		return dir, true, cleanup, nil
 	}
 
 	abs, err := filepath.Abs(source)
 	if err != nil {
-		return "", noop, fmt.Errorf("resolve repo path: %w", err)
+		return "", false, noop, fmt.Errorf("resolve repo path: %w", err)
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		return "", noop, fmt.Errorf("repo path: %w", err)
+		return "", false, noop, fmt.Errorf("repo path: %w", err)
 	}
 	if !info.IsDir() {
-		return "", noop, fmt.Errorf("repo path %q is not a directory", abs)
+		return "", false, noop, fmt.Errorf("repo path %q is not a directory", abs)
 	}
-	return abs, noop, nil
+	return abs, false, noop, nil
 }
 
 // isGitURL reports whether source should be treated as a git URL to clone
@@ -384,12 +449,14 @@ func printScanSummaryLine(w io.Writer, scanned bool, scanReport analyze.Report) 
 // printTopFindings in scan.go), and a single free-text RESULT line. It
 // intentionally omits the protections rationale and the raw install log
 // (printed separately, only on install failure) that --verbose keeps.
-func printCompactReport(w io.Writer, p sandbox.Profile, r sandbox.Result, scanned bool, report analyze.Report) {
+func printCompactReport(w io.Writer, p sandbox.Profile, r sandbox.Result, prefetch prefetchOutcome, scanned bool, report analyze.Report) {
 	netDesc := "network denied (--strict, no logs)"
 	if p.InspectEgress {
 		netDesc = "network inspected (fail-closed)"
 	}
 	fmt.Fprintf(w, "%s sandbox    %s, %s, ephemeral\n", glyphOK, p.Image, netDesc)
+
+	printCompactPrefetchLine(w, prefetch)
 
 	installGlyph := glyphOK
 	if r.InstallExitCode != 0 {
@@ -446,6 +513,21 @@ func summarizeCompactResult(r sandbox.Result, scanned bool, highCrit int) string
 		return summary + fmt.Sprintf(" Review the %d high/critical finding(s) above before trusting this repo.", highCrit)
 	}
 	return summary + " No high/critical scan findings."
+}
+
+// printCompactPrefetchLine is the one-line prefetch summary for the status
+// checklist. It states plainly whether dependencies were fetched offline (so
+// dependency lifecycle scripts run in the box) or the run is single-phase (only
+// the repo's own root scripts run, because the sandbox has no network).
+func printCompactPrefetchLine(w io.Writer, prefetch prefetchOutcome) {
+	switch {
+	case prefetch.Attempted && prefetch.OK:
+		fmt.Fprintf(w, "%s prefetch   dependencies fetched in a no-host-mount container (no scripts run); deps install in-box\n", glyphOK)
+	case prefetch.Attempted && !prefetch.OK:
+		fmt.Fprintf(w, "%s prefetch   %s\n", glyphWarn, prefetch.Detail)
+	default:
+		fmt.Fprintln(w, "- prefetch   single-phase (sandbox has no network; dependency scripts do not run)")
+	}
 }
 
 // printCompactEgressLine is the one-line egress summary for the status
