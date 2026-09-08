@@ -197,3 +197,25 @@ here.
   distinct `Result.EgressReadFailed`). Not yet checked: rootless runtimes
   (Podman) and kernels without `nfnetlink_log`, where the monitor fails to start
   and the CLI falls back to `--network none`.
+
+## 0015 - Ecosystem auto-detection from repo manifests
+
+- Decision: When `--image` / `--cmd` are unset, detect the ecosystem by reading
+  the repo's top-level manifest files (`sandbox.DetectEcosystem`) and supply the
+  image + install command. Ordered detectors, first match wins: node before
+  python; within python, `requirements.txt` before a project manifest. Node and
+  python are the only ecosystems detected for now. No match falls back to the
+  locked-down defaults; an explicit flag always overrides. Reverses the earlier
+  "auto-detection is out of scope (tier-2)" note.
+- Alternatives: Keep requiring `--image`/`--cmd` (rejected: needless friction
+  for the two common cases meguard targets); read manifest CONTENTS to pick
+  package managers (yarn/pnpm/poetry) precisely (deferred: node:20-slim ships
+  only npm and reading contents is more surface than existence checks buy today);
+  put detection in a future `analyze` package (rejected: it selects a sandbox
+  RELAX value and must not pull `analyze` into the sandbox path, per the import
+  guard).
+- Reason: Choosing an image is not executing code, so detection stays on the safe
+  side of invariant 1 by only calling `os.Stat`; it only ever fills the two RELAX
+  values, never a security control, so invariant 3 holds. The node case reuses
+  `DefaultImage`/`DefaultInstallCmd` to avoid drift, and pip uses `--user` so
+  installs land on the writable HOME tmpfs under the read-only root.

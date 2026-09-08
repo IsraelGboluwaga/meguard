@@ -20,9 +20,10 @@ type Profile struct {
 	// repo's dependencies. Empty means DefaultInstallCmd. This is the second
 	// and last ecosystem-specific value.
 	//
-	// TODO(tier-2): auto-detect the ecosystem (npm, pip, and so on) from repo
-	// manifests instead of requiring --image and --cmd. Auto-detection is out
-	// of scope for this slice.
+	// When the caller leaves Image/InstallCmd unset, cmd/run.go fills them from
+	// DetectEcosystem (see detect.go), which reads the repo's manifests. An
+	// explicit --image/--cmd still wins, and a repo with no recognized manifest
+	// falls back to these defaults via Normalize.
 	InstallCmd []string
 
 	// Memory is the container memory ceiling passed to --memory. Empty means

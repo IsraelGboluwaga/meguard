@@ -51,9 +51,10 @@ unprivileged user rather than host root.`,
 	}
 
 	// The image and install command are the only two ecosystem-specific values.
-	// Auto-detection is out of scope for this slice (TODO tier-2).
-	cmd.Flags().StringVar(&image, "image", "", "container image (default node:20-slim)")
-	cmd.Flags().StringVar(&installCmd, "cmd", "", `install command run inside the sandbox (default: "npm install")`)
+	// When left unset they are auto-detected from the repo's manifests (see
+	// sandbox.DetectEcosystem); an explicit flag always wins over detection.
+	cmd.Flags().StringVar(&image, "image", "", "container image (default: auto-detected from repo, else node:20-slim)")
+	cmd.Flags().StringVar(&installCmd, "cmd", "", `install command run inside the sandbox (default: auto-detected from repo, else "npm install")`)
 	// The runtime is the trust boundary. Empty means "docker"; any
 	// Docker-compatible CLI works (podman, nerdctl, ...). Rootless runtimes
 	// shrink the blast radius of a container escape and are preferred for
@@ -108,7 +109,23 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 		profile.InstallCmd = fields
 	}
 
-	printPreRunNotice(stdout, o.source, o.runtimeBin, profile.Normalize())
+	// Auto-detect the ecosystem from the repo's manifests and fill any field the
+	// user did not set explicitly. An explicit --image or --cmd always wins;
+	// detection only ever supplies the same RELAX values Normalize would, so it
+	// cannot weaken the sandbox. Detection reads file existence only and runs no
+	// repo code.
+	ecosystem := "unknown (using locked-down defaults)"
+	if eco, ok := sandbox.DetectEcosystem(repoDir); ok {
+		ecosystem = eco.Name
+		if profile.Image == "" {
+			profile.Image = eco.Image
+		}
+		if len(profile.InstallCmd) == 0 {
+			profile.InstallCmd = eco.InstallCmd
+		}
+	}
+
+	printPreRunNotice(stdout, o.source, o.runtimeBin, ecosystem, profile.Normalize())
 
 	fmt.Fprintln(stdout, sectionRule)
 	fmt.Fprintln(stdout, "SANDBOX OUTPUT")
@@ -204,7 +221,7 @@ func isGitURL(source string) bool {
 	return strings.HasSuffix(source, ".git")
 }
 
-func printPreRunNotice(w io.Writer, source, runtimeBin string, p sandbox.Profile) {
+func printPreRunNotice(w io.Writer, source, runtimeBin, ecosystem string, p sandbox.Profile) {
 	runtimeName := runtimeBin
 	if runtimeName == "" {
 		runtimeName = "docker"
@@ -212,6 +229,7 @@ func printPreRunNotice(w io.Writer, source, runtimeBin string, p sandbox.Profile
 	fmt.Fprintln(w, "meguard: preparing locked-down sandbox")
 	fmt.Fprintf(w, "  source:           %s\n", source)
 	fmt.Fprintf(w, "  runtime:          %s (trust boundary)\n", runtimeName)
+	fmt.Fprintf(w, "  ecosystem:        %s\n", ecosystem)
 	fmt.Fprintf(w, "  image:            %s\n", p.Image)
 	fmt.Fprintf(w, "  install command:  %s\n", strings.Join(p.InstallCmd, " "))
 	fmt.Fprintln(w, "active protections:")
