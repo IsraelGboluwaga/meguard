@@ -21,6 +21,16 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ### Changed
 
+- Static scan now skips more Python dependency trees and inert tool caches
+  (`skipDirNames` in `internal/analyze/walk.go`): added `env`, `.tox`,
+  `.eggs`, `.mypy_cache`, `.pytest_cache`, and glob-named packaging metadata
+  dirs `*.egg-info`/`*.dist-info` (via the new `isGeneratedMetadataDir`), on
+  top of the existing `node_modules`/`vendor`/`.next`/`__pycache__`/`venv`/
+  `.venv`. The dependency trees hold installed package code that CAN carry a
+  payload, but so does `node_modules`, which was always skipped: containment
+  (the sandboxed run), not the advisory scan, is the safety net, and these
+  trees are normally gitignored and created at install time in the container.
+  `dist/`/`build/` remain walked. Cuts scan noise and time on Python repos.
 - Compact `meguard run` no longer echoes the invoked `meguard run <source>`
   command back as a header line (the user already typed it). Compact
   `meguard scan` likewise drops the repeated source path; its header is now

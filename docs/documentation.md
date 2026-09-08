@@ -339,6 +339,20 @@ then runs every analyzer against the shared `[]ScannedFile` result, then a
 correlation pass, dedupe, and a deterministic sort (severity, then file, then
 line).
 
+The walk never descends into version-control metadata, third-party dependency
+trees, or inert tool caches (`skipDirNames` in `walk.go`): `.git`,
+`node_modules`, `vendor`, `.next`, and the Python set `__pycache__`, `venv`,
+`.venv`, `env`, `.tox`, `.eggs`, `.mypy_cache`, `.pytest_cache`, plus glob-named
+packaging metadata dirs (`*.egg-info`/`*.dist-info`, via
+`isGeneratedMetadataDir`). The dependency trees CAN carry a malicious payload,
+but so can `node_modules`, which has always been skipped: this is a consistent,
+deliberate tradeoff, not a hole. Containment (the sandboxed run), not the
+advisory scan, is the safety net for whatever a dependency ships, and these
+trees are normally gitignored and created at install time inside the container,
+not committed. `dist/` and `build/` are DELIBERATELY still walked (an attacker
+could disguise a payload as a build artifact); only the generic entropy/long-
+line check skips those, and only for that one heuristic.
+
 `Finding` carries an `Analyzer` name, a `Category` (used by the correlation
 pass), a `Severity` (Info/Low/Medium/High/Critical), the file and line, a
 message, a bounded snippet, and a dedupe `Count`. `Report` carries the

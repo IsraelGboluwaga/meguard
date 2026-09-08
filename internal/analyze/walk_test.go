@@ -10,9 +10,20 @@ import (
 func TestWalkFilesSkipsNoiseDirs(t *testing.T) {
 	root := writeRepo(t, map[string]string{
 		"index.js":                  "console.log(1);\n",
+		"main.py":                   "print(1)\n",
 		"node_modules/pkg/index.js": "console.log(2);\n",
 		".git/HEAD":                 "ref: refs/heads/main\n",
 		"dist/bundle.min.js":        "var a=1;\n",
+		// Python dependency trees and inert tool caches: same tier as
+		// node_modules (see skipDirNames), must be skipped.
+		"env/lib/site-packages/p.py":    "print(2)\n",
+		".tox/py311/lib/pkg.py":         "print(3)\n",
+		".eggs/dep-1.0.egg/mod.py":      "print(4)\n",
+		".mypy_cache/3.11/x.data.json":  "{}\n",
+		".pytest_cache/v/cache/nodeids": "[]\n",
+		// Generated packaging metadata dirs (glob-named, matched by suffix).
+		"proj.egg-info/PKG-INFO": "Name: proj\n",
+		"proj.dist-info/RECORD":  "proj/__init__.py,,\n",
 	})
 
 	files, _, err := walkFiles(root)
@@ -25,7 +36,7 @@ func TestWalkFilesSkipsNoiseDirs(t *testing.T) {
 		paths = append(paths, f.RelPath)
 	}
 
-	for _, want := range []string{"index.js", "dist/bundle.min.js"} {
+	for _, want := range []string{"index.js", "main.py", "dist/bundle.min.js"} {
 		found := false
 		for _, p := range paths {
 			if p == want {
@@ -36,11 +47,39 @@ func TestWalkFilesSkipsNoiseDirs(t *testing.T) {
 			t.Errorf("expected %s to be scanned, got %v", want, paths)
 		}
 	}
-	for _, unwanted := range []string{"node_modules/pkg/index.js", ".git/HEAD"} {
+	for _, unwanted := range []string{
+		"node_modules/pkg/index.js",
+		".git/HEAD",
+		"env/lib/site-packages/p.py",
+		".tox/py311/lib/pkg.py",
+		".eggs/dep-1.0.egg/mod.py",
+		".mypy_cache/3.11/x.data.json",
+		".pytest_cache/v/cache/nodeids",
+		"proj.egg-info/PKG-INFO",
+		"proj.dist-info/RECORD",
+	} {
 		for _, p := range paths {
 			if p == unwanted {
 				t.Errorf("expected %s to be skipped, but it was scanned", unwanted)
 			}
+		}
+	}
+}
+
+func TestIsGeneratedMetadataDir(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"proj.egg-info", true},
+		{"my_pkg-1.2.3.dist-info", true},
+		{"egg-info", false}, // no package-name prefix / not a suffix boundary
+		{"src", false},
+		{"info", false},
+	}
+	for _, tt := range tests {
+		if got := isGeneratedMetadataDir(tt.name); got != tt.want {
+			t.Errorf("isGeneratedMetadataDir(%q) = %v, want %v", tt.name, got, tt.want)
 		}
 	}
 }
