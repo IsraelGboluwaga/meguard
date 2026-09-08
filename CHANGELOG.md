@@ -33,6 +33,12 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ### Added
 
+- CI workflow (`.github/workflows/ci.yml`): runs on every push and pull request
+  against `main`. Checks out, sets up Go from `go.mod`, then runs `gofmt -l`,
+  `go mod verify`, `go build ./...`, `go vet ./...`, `go test ./...`, and a
+  dedicated step that rebuilds the pure static binary (`CGO_ENABLED=0`) and
+  confirms `go version -m` reports `CGO_ENABLED=0`, enforcing the "run binary
+  stays pure Go" rule from CLAUDE.md in CI, not just at release time.
 - Packet-level egress visibility (the default `meguard run` behavior; see
   Changed above for the default-flip and `--strict`). meguard starts a hardened
   monitor sidecar (its own netns has no route out, only a logging sinkhole) and
