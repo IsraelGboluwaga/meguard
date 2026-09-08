@@ -1,12 +1,18 @@
 # meguard
 
-Safely execute untrusted repositories inside a locked-down container sandbox.
+Safely execute untrusted repositories inside a locked-down container sandbox,
+and statically scan them for signs of hidden malicious code.
 
 meguard is a fast, lightweight Go CLI for running repos you do not trust, for
 example fake-interview repos that hide infostealer or RAT payloads in
 `postinstall` hooks or obfuscated blobs. It clones or copies the repo into a
 hardened container and runs the install command there. Repo code never touches
 your host.
+
+meguard is a container AND a detector: `meguard run` combines the sandbox with
+a static scan of the repo's files (advisory by default), and `meguard scan`
+runs that same detection alone, with no container and no Docker dependency at
+all. See [Static scan](#static-scan-meguard-scan) below.
 
 ## Safety model
 
@@ -46,9 +52,15 @@ Install with Go (works today):
 
     go install github.com/IsraelGboluwaga/meguard@latest
 
-Or build from source (pure static, cgo-free `run` binary):
+Or build from source. meguard ships two build variants, same binary name and
+commands (see [Static scan](#static-scan-meguard-scan) for what differs
+between them):
 
+    # Pure static (zero-dependency; run binary is cgo-free)
     CGO_ENABLED=0 go build -o meguard .
+
+    # Full cgo variant
+    CGO_ENABLED=1 go build -tags cgo -o meguard .
 
 Homebrew (available once the first release is tagged; see docs/launch.md):
 
@@ -63,10 +75,22 @@ variants, and verification.
 
 ## Usage
 
-    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"] [--runtime CLI] [--strict]
+    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"] [--runtime CLI] [--strict] [--no-scan] [--fail-on-scan]
+    meguard scan <repo-url-or-path>
 
-`run` accepts a git URL (cloned to a temp dir that is always cleaned up) or a
-local path (copied, never bind mounted).
+`run` and `scan` both accept a git URL (cloned to a temp dir that is always
+cleaned up) or a local path (copied, never bind mounted).
+
+Before creating the sandbox, `run` also statically scans the repo on the host
+(manifest inspection, entropy/long-line detection, and pattern matching for
+obfuscation and exfiltration signals) and prints a STATIC SCAN section.
+Findings are advisory by default: the sandboxed run proceeds regardless of
+what scan found, because containment, not scan, is the safety net. Pass
+`--no-scan` to skip scanning entirely (the pre-scan behavior), or
+`--fail-on-scan` to make `run` exit non-zero after the run completes if scan
+reported any High or Critical finding. See
+[Static scan](#static-scan-meguard-scan) below for what scan looks for and for
+`meguard scan`, which runs the same detection alone with no Docker dependency.
 
 Examples:
 
@@ -178,18 +202,79 @@ followed by the list of runtimes that satisfy the requirement. Start your runtim
 and check it with one of `orbstack status`, `colima status`, `podman info`, or
 `docker info`, then retry. You do not need Docker Desktop.
 
-## scan (coming later, not in this release)
+## Static scan (`meguard scan`)
 
-A future `scan` command will statically analyze a repo before you ever run it,
-using analyzers behind a single interface (manifest, entropy, regex, and an AST
-analyzer). It will ship in two build variants:
+    meguard scan <repo-url-or-path>
 
-- a full build (includes the tree-sitter AST analyzer, needs cgo), and
-- a zero-dependency pure-static build (omits AST; still runs manifest, entropy,
-  and regex).
+`scan` resolves the repo the same safe way `run` does (a plain `git clone`;
+cloning does not run install hooks, so this is safe on the host) and then runs
+meguard's static analyzers against the repo's files, entirely on the host. It
+never touches Docker and never executes repo code; it is a heuristic
+detector, not a prover: a clean report means nothing matched, not
+"definitely safe". For that guarantee, run the repo inside the sandbox with
+`meguard run`, which combines this same scan with containment in one command.
 
-On the pure build, the absence of AST is stated explicitly, never presented as
-"AST found nothing". `run` and its sandbox never depend on scan.
+Examples:
+
+    # Scan alone, no container, no Docker dependency at all
+    meguard scan https://github.com/some/suspicious-repo.git
+
+    # A local path
+    meguard scan ./downloaded-take-home
+
+    # meguard run scans first (advisory), then sandboxes the install
+    meguard run ./suspicious-repo
+
+    # Skip the scan entirely and go straight to the sandbox (old behavior)
+    meguard run ./suspicious-repo --no-scan
+
+    # Gate a CI pipeline: exit non-zero if scan found anything High/Critical,
+    # after the sandboxed run has still completed
+    meguard run ./suspicious-repo --fail-on-scan
+
+What scan looks for, via analyzers behind a single `Analyzer` interface:
+
+- **manifest**: `package.json` lifecycle scripts (`preinstall`, `install`,
+  `postinstall`, `prepare`, `preprepare`) scanned with the same pattern set as
+  source files; Python manifests (`setup.py`, `pyproject.toml`, `setup.cfg`,
+  `Pipfile`) are flagged at Info, since arbitrary code can run at install time
+  for that ecosystem regardless of content.
+- **entropy**: per-line length plus Shannon entropy on lines over 300
+  characters, catching an obfuscated payload appended after legitimate code on
+  the same physical line, in any text file. Checked-in minified bundles
+  (`dist/`, `build/`, `*.min.js`, `*.bundle.js`) are excluded.
+- **regex**: cheap first-pass pattern matching for obfuscation (packer
+  signatures, `Function`-constructor eval, global-stashed `require`, the
+  `_0xNNNN` obfuscator-tool fingerprint), download-and-execute (curl/wget
+  piped to a shell, Python shell exec, Windows LOLBins), exfiltration channels
+  (Discord webhooks, Telegram bot API, raw-paste hosts), credential/wallet
+  file paths, persistence mechanisms, recon/fingerprinting, and bulk
+  `process.env` dumps, plus co-occurrence checks for plain-text exfiltration
+  (a network call plus a secrets marker in one file, or a network call inside
+  a build/lint/tooling config file that has no legitimate reason to make one).
+
+To keep false positives down, severity is capped by whether a file can
+actually execute (prose files like `.md`/`.txt` are capped at Info; a string
+in documentation is evidence of nothing), a correlation pass escalates two or
+more distinct weak-signal categories co-located in one file into a stronger
+finding, and dedupe collapses repeats of the same finding in one file into a
+single entry with an occurrence count.
+
+`scan` exits non-zero if any High or Critical finding is reported, so it can
+gate a CI pipeline on its own; `meguard run --fail-on-scan` does the same gate
+while also containing and observing the repo.
+
+meguard ships two build variants, same binary name and commands:
+
+- a full **cgo** build, and
+- a zero-dependency **pure static** build (`CGO_ENABLED=0`).
+
+Both variants currently run manifest, entropy, and regex analysis. Neither
+variant has a working AST (tree-sitter) analyzer yet: wiring a real
+tree-sitter grammar is future work, out of scope for this slice. AST is a
+labeled no-op in both builds today ("AST analysis: disabled (...)" in the
+STATIC SCAN section) so the absence is stated, never silently presented as
+"AST found nothing".
 
 ## Contributing
 

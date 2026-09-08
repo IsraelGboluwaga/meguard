@@ -26,20 +26,26 @@ Debian/Alpine-based images include it.
 ### To build meguard
 
 - Go 1.24 or newer.
-- For the full (cgo) variant only: a C toolchain and tree-sitter build
-  requirements per platform (once scan lands). The pure variant needs no C
-  toolchain.
+- Neither variant needs a C toolchain today. Scan is implemented
+  (`internal/analyze`: manifest, entropy, regex), but its AST analyzer is
+  still a labeled no-op behind the cgo build tag on BOTH variants (no package
+  in the repo imports cgo yet; see docs/documentation.md's Scan architecture
+  section). A C toolchain and tree-sitter build requirements per platform
+  will become necessary for the full (cgo) variant once a real tree-sitter
+  grammar is wired in.
 
 ## Build from source (both variants)
 
 Two variants ship under the same binary name and the same commands.
 
-Pure static variant (zero-dependency; the `run` binary is cgo-free; omits the
-future AST analyzer):
+Pure static variant (zero-dependency; the `run` binary is cgo-free; scan runs
+manifest, entropy, and regex analysis; AST is a labeled no-op):
 
     CGO_ENABLED=0 go build -o meguard .
 
-Full cgo variant (adds the tree-sitter AST analyzer once scan exists):
+Full cgo variant (the build-tag seam scan's AST analyzer will use once a real
+tree-sitter grammar is wired in; today it is functionally identical to the
+pure variant, still a labeled no-op with a different disabled-reason string):
 
     # macOS: needs Xcode command line tools
     # Linux: needs gcc/clang and the platform C headers
@@ -76,12 +82,16 @@ builds cross-platform binaries (macOS + Linux, amd64 + arm64), writes a
 `checksums.txt` (SHA256), publishes a GitHub Release with the archives attached,
 and pushes a Homebrew formula to the tap repo.
 
-Current variant: the release ships the PURE static (`CGO_ENABLED=0`) binary,
-which is meguard's only meaningful variant today (there is no cgo code yet). When
-scan lands with the tree-sitter AST analyzer, add a second `builds` entry with
-`CGO_ENABLED=1` and `-tags cgo` (per-OS runners for the C toolchain) and make the
-full cgo binary the primary download, keeping the pure build as the
-zero-dependency alternative.
+Current variant: the release ships the PURE static (`CGO_ENABLED=0`) binary.
+This is still meguard's only meaningful release variant: scan is implemented
+(manifest, entropy, regex), but its AST analyzer is a labeled no-op on both
+build tags (no package imports cgo yet), so a cgo build today is functionally
+identical to the pure build. When a real tree-sitter grammar is wired in
+behind the existing cgo build tag (see docs/documentation.md's Scan
+architecture section), add a second `builds` entry with `CGO_ENABLED=1` and
+`-tags cgo` (per-OS runners for the C toolchain) and make the full cgo binary
+the primary download, keeping the pure build as the zero-dependency
+alternative.
 
 ### One-time setup before the first release
 
@@ -117,23 +127,34 @@ release version is injected into the binary via ldflags and shown by
 
 - A `curl | sh` installer script that downloads the right binary and verifies its
   checksum against `checksums.txt`.
-- Once scan ships: publish both build variants (full cgo primary, pure static
-  alternative) in the same release.
+- Once a real tree-sitter grammar is wired into the AST analyzer (scan itself
+  has already shipped; see docs/documentation.md): publish both build variants
+  (full cgo primary, pure static alternative) in the same release.
 
 ## Verify after install
 
     meguard --help
     meguard run --help
+    meguard scan --help
+
+    # Scan alone, no container, no Docker dependency at all:
+    meguard scan https://github.com/octocat/Hello-World.git
 
     # End to end against a known-safe repo, with a compatible runtime running:
     meguard run https://github.com/octocat/Hello-World.git
 
-Expected: a pre-run notice listing the active protections, streamed sandbox
-output under a labeled section, and a result with the install exit code and the
-"0 host secrets exposed (by construction)" line. Note that Hello-World has no
-package.json, so `npm install` reports a non-zero install exit code; that is the
-sandboxed command's outcome, not a meguard failure. Point `run` at a repo with a
+Expected for `run`: a pre-run notice listing the active protections, a STATIC
+SCAN section (skip with `--no-scan`), streamed sandbox output under a labeled
+section, and a result with the install exit code and the "0 host secrets
+exposed (by construction)" line. Note that Hello-World has no package.json, so
+`npm install` reports a non-zero install exit code; that is the sandboxed
+command's outcome, not a meguard failure. Point `run` at a repo with a
 package.json (or pass `--cmd`) to see a zero install exit code.
+
+Expected for `scan`: a STATIC SCAN section with a files-scanned count, the
+AST-disabled line (labeled, never silent), and either "findings: none" or a
+list of findings; `scan` exits non-zero only if any High/Critical finding was
+reported.
 
 If meguard reports it cannot reach the runtime, confirm your Docker-compatible
 runtime is installed and running (for example `orbstack status`, `colima status`,

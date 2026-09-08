@@ -8,6 +8,58 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ## [Unreleased]
 
+### Added
+
+- Static scan, implemented (`internal/analyze`): manifest, entropy, and regex
+  analyzers behind a single `Analyzer` interface, composed by `Scan(repoDir)`,
+  which walks the repo once, runs every analyzer, then a correlation pass,
+  dedupe, and a deterministic sort. The AST (tree-sitter) analyzer stays a
+  labeled no-op behind a cgo build tag on both build variants (real grammar
+  wiring is future work); `Report.ASTEnabled`/`ASTDisabledReason` state the
+  absence explicitly, so a clean scan is never presented as "AST found
+  nothing".
+  - `manifest.go`: flags package.json lifecycle scripts (preinstall/install/
+    postinstall/prepare/preprepare) with the same pattern set as source files;
+    Python manifests (setup.py/pyproject.toml/setup.cfg/Pipfile) are flagged
+    at Info.
+  - `entropy.go`: per-line length plus Shannon entropy on lines over 300
+    characters, catching an obfuscated payload appended after legitimate code
+    on the same physical line, in any text file. Excludes `dist/`, `build/`,
+    `*.min.js`, `*.bundle.js`.
+  - `regex.go`: pattern matching for obfuscation (packer signature,
+    Function-constructor eval, global-stashed require, the `_0xNNNN`
+    obfuscator fingerprint), download-and-execute, exfiltration channels
+    (Discord webhooks, Telegram bot API, raw-paste hosts), credential/wallet
+    paths, persistence, recon, bulk `process.env` dumps, plus co-occurrence
+    checks for plain-text exfiltration.
+  - False-positive controls: severity capped at Info for prose files
+    (`.md`/`.mdx`/`.txt`/`.rst`/`.adoc`); a correlation pass escalates two or
+    more distinct weak-signal categories co-located in one file into an
+    additional High finding; dedupe collapses repeated matches in one file
+    into a single finding with an occurrence count.
+- `meguard scan <repo-url-or-path>`: a new subcommand that resolves the repo
+  the same safe way `run` does (git clone only, no execution) and runs the
+  static analyzers alone, with no container and no Docker dependency at all.
+  Prints a STATIC SCAN section and exits non-zero if any High/Critical
+  finding is reported, so it can gate a CI pipeline on its own.
+- `meguard run` now also runs the static scan on the host before creating the
+  sandbox, printing the same STATIC SCAN section between the pre-run notice
+  and the SANDBOX OUTPUT section. Findings are ADVISORY by default: the
+  sandboxed run proceeds regardless of what scan found, because containment,
+  not scan, is the safety net. Two new flags:
+  - `--no-scan`: skip the static scan entirely, restoring the pre-scan
+    behavior exactly.
+  - `--fail-on-scan`: after the sandboxed run completes, exit non-zero if the
+    static scan reported any High or Critical finding.
+  A scan failure (for example an unreadable repo dir) is logged to stderr and
+  never blocks the sandboxed run.
+- `internal/sandbox` still never imports `analyze` (unchanged;
+  `TestSandboxDoesNotImportAnalyze` still passes). `cmd` (where `run` and
+  `scan` live) now legitimately does import `analyze`, a deliberate,
+  reviewed architecture point: detection and containment are combined at the
+  CLI layer, while the sandbox's containment guarantee stays structurally
+  independent of scan.
+
 ### Changed
 
 - Egress inspection is now the DEFAULT for `meguard run` (previously opt-in via
@@ -165,4 +217,6 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   logs). If the monitor cannot start, the CLI falls back to `--network none`.
 - `--memory` and `--cpus` are conservative defaults that will become
   user-configurable.
-- scan, analyzers, and tree-sitter are NOT implemented in this slice.
+- scan (manifest, entropy, regex analyzers) is implemented; see the Added
+  entry near the top of this file. The AST/tree-sitter analyzer is still NOT
+  implemented, a labeled no-op on both build variants.

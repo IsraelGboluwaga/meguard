@@ -219,3 +219,51 @@ here.
   values, never a security control, so invariant 3 holds. The node case reuses
   `DefaultImage`/`DefaultInstallCmd` to avoid drift, and pip uses `--user` so
   installs land on the writable HOME tmpfs under the read-only root.
+
+## 0016 - Implement scan; `run` becomes "container AND detector"
+
+- Decision: Implement `internal/analyze` for real (manifest, entropy, regex
+  analyzers; a labeled-no-op AST seam behind cgo build tags) and wire it into
+  `meguard run`, which now statically scans a repo before the sandboxed run
+  and prints a STATIC SCAN section. Findings are ADVISORY by default (the
+  sandboxed run proceeds regardless; containment, not scan, is the safety
+  net) unless `--fail-on-scan` is set. `--no-scan` restores the pre-scan
+  behavior exactly. A new `meguard scan <repo>` subcommand runs the same
+  detection alone, with no Docker dependency at all, and exits non-zero on
+  any High/Critical finding by default. This reverses decision 0002
+  ("Run-led, not scan-led": ship run first, document scan, do not implement
+  it) now that run is solid (egress inspection, decision 0014, just landed
+  and was live-verified).
+- Alternatives: Keep scan document-only indefinitely (rejected: the
+  motivating case - a build-time RCE hidden as an obfuscated payload
+  appended after `} satisfies Config;` on the same physical line of a
+  `tailwind.config.ts`, invisible unless you scroll - is exactly what static
+  inspection catches and pure containment does not surface); make scan
+  findings BLOCK the sandboxed run by default (rejected: the product's core
+  value is "run it to SEE what happens", established by decision 0014's
+  egress visibility; a heuristic scanner has both false positives and false
+  negatives, so making it an involuntary gate would either block legitimate
+  repos on a noisy match or give false confidence when it stays quiet -
+  advisory-by-default with an explicit `--fail-on-scan` opt-in serves both
+  the "always run it" and "gate my CI" cases without changing the default
+  behavior anyone already depends on); wire a real tree-sitter AST analyzer
+  now (deferred: it is a materially larger dependency and per-language
+  grammar surface than manifest/entropy/regex needed to catch the motivating
+  case, and CLAUDE.md already anticipated exactly this seam - build-tag
+  isolated, labeled no-op when absent - so implementing the seam without the
+  grammar keeps the documented architecture live and honest rather than
+  half-built).
+- Reason: Detection and containment now compose instead of one blocking the
+  other. `internal/sandbox` still never imports `analyze` (unchanged,
+  `TestSandboxDoesNotImportAnalyze` still passes); `cmd` now legitimately
+  does, which is where the two are combined. Every analyzer only reads file
+  bytes (`internal/analyze/walk.go`, `os.ReadFile`) on the host, before any
+  container work - the same trust tier as `sandbox.DetectEcosystem` - so
+  invariant 1 is unaffected. False-positive control was designed in
+  alongside detection, not bolted on after: severity is capped by whether a
+  file can actually execute (prose is capped at Info - this repo's own
+  CLAUDE.md and docs/decisions.md discuss an example payload as prose, and
+  scan must not treat its own docs as a threat), a correlation pass only
+  escalates when two or more DISTINCT weak signal categories land in the
+  same file, and dedupe collapses repeated matches so one large file cannot
+  flood the report.

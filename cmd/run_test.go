@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/IsraelGboluwaga/meguard/internal/analyze"
 	"github.com/IsraelGboluwaga/meguard/internal/sandbox"
 )
 
@@ -106,7 +107,7 @@ func TestPrintPreRunNoticeRuntime(t *testing.T) {
 
 func TestPrintResult(t *testing.T) {
 	var buf bytes.Buffer
-	printResult(&buf, sandbox.Result{InstallExitCode: 5})
+	printResult(&buf, sandbox.Result{InstallExitCode: 5}, true, analyze.Report{})
 	out := buf.String()
 	for _, want := range []string{
 		"install exit code: 5",
@@ -129,7 +130,7 @@ func TestPrintResultEgressBlocked(t *testing.T) {
 			{Proto: "tcp", Dest: "185.220.101.5:443"},
 			{Proto: "dns", Dest: "api.evil-c2.net"},
 		},
-	})
+	}, true, analyze.Report{})
 	out := buf.String()
 	for _, want := range []string{
 		"2 outbound attempt(s) BLOCKED",
@@ -146,7 +147,7 @@ func TestPrintResultEgressBlocked(t *testing.T) {
 // inspected". A clean result is a stated absence, never silent.
 func TestPrintResultEgressCleanIsExplicit(t *testing.T) {
 	var buf bytes.Buffer
-	printResult(&buf, sandbox.Result{EgressInspected: true, Egress: []sandbox.EgressEvent{}})
+	printResult(&buf, sandbox.Result{EgressInspected: true, Egress: []sandbox.EgressEvent{}}, true, analyze.Report{})
 	if out := buf.String(); !strings.Contains(out, "0 outbound attempts observed") {
 		t.Errorf("clean inspected run must state zero attempts explicitly\n  got:\n%s", out)
 	}
@@ -156,7 +157,7 @@ func TestPrintResultEgressCleanIsExplicit(t *testing.T) {
 // repo made zero calls.
 func TestPrintResultEgressUnreadable(t *testing.T) {
 	var buf bytes.Buffer
-	printResult(&buf, sandbox.Result{EgressInspected: true, EgressReadFailed: true, Egress: nil})
+	printResult(&buf, sandbox.Result{EgressInspected: true, EgressReadFailed: true, Egress: nil}, true, analyze.Report{})
 	out := buf.String()
 	if !strings.Contains(out, "could not be read") {
 		t.Errorf("unreadable monitor must be surfaced\n  got:\n%s", out)
@@ -171,7 +172,7 @@ func TestPrintResultEgressUnreadable(t *testing.T) {
 // live run surfaced.
 func TestPrintResultEgressCleanNilIsZeroNotUnreadable(t *testing.T) {
 	var buf bytes.Buffer
-	printResult(&buf, sandbox.Result{EgressInspected: true, EgressReadFailed: false, Egress: nil})
+	printResult(&buf, sandbox.Result{EgressInspected: true, EgressReadFailed: false, Egress: nil}, true, analyze.Report{})
 	out := buf.String()
 	if !strings.Contains(out, "0 outbound attempts observed") {
 		t.Errorf("a clean run with nil Egress must report zero attempts\n  got:\n%s", out)
