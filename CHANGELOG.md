@@ -60,6 +60,16 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ### Fixed
 
+- Ecosystem detection: a repo that is just a bare Python script with no
+  manifest (a top-level `*.py` and nothing else, for example a single
+  `apalara.py`) is now detected as python (`python:3.12-slim`) instead of
+  falling through to the node defaults and running `npm install` against a
+  missing `package.json`. New `hasTopLevelPyFile` fallback in
+  `internal/sandbox/detect.go` (`os.ReadDir` of the repo root, still top-level
+  and read-only, runs no repo code). There is nothing to install for a
+  manifest-less script, so its install command is a NO-OP (`python --version`);
+  run the script itself with an explicit `--cmd`. Manifests still win over this
+  fallback, and node still wins over python for a polyglot repo.
 - `entropy` analyzer: exclude a `.svg` file from the long-line/entropy
   heuristic (`isSVGPath` in `internal/analyze/walk.go`, alongside the
   existing `isMinifiedOrVendorPath`), but ONLY when it carries no `<script>`
