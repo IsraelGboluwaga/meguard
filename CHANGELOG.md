@@ -8,24 +8,37 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ## [Unreleased]
 
+### Changed
+
+- Egress inspection is now the DEFAULT for `meguard run` (previously opt-in via
+  `--inspect-egress`, now removed). A plain `meguard run <repo>` logs every
+  blocked outbound attempt. The new `--strict` flag drops to `--network none`
+  (no network stack at all, no logs) for the hardest, fully-verified containment.
+  Egress is denied in both modes. Because inspected mode is EXPERIMENTAL (not yet
+  verified on a live Linux host) and needs a monitor image + NFLOG, the CLI
+  FALLS BACK to `--network none` with a printed warning if the monitor cannot
+  start (`sandbox.ErrMonitorUnavailable`), so `meguard run` keeps working
+  everywhere and never silently loses containment. The library zero-value
+  Profile still selects `--network none`, so invariant 3 is unchanged; CLAUDE.md
+  invariant 4 is updated to "egress always denied, in one of two modes".
+
 ### Added
 
-- `--inspect-egress` flag on `meguard run`: opt-in packet-level egress
-  visibility. Instead of `--network none`, meguard starts a hardened monitor
-  sidecar (its own netns has no route out, only a logging sinkhole) and the
-  sandbox joins that netns via `--network container:<monitor>`. Every outbound
-  TCP connection attempt (to any IP:port, so hardcoded C2 is caught) and DNS
-  query is LOGGED and DROPPED; nothing ever leaves the host. The result section
-  now lists blocked attempts (e.g. `BLOCKED tcp 185.220.101.5:443`) instead of
-  the old TODO line, and states an explicit "0 outbound attempts" when the repo
-  made none. Default stays `--network none` (safest); the flag only ever RELAXES
-  to a still-no-egress, now-observable posture (invariant 3/4 preserved). A new
+- Packet-level egress visibility (the default `meguard run` behavior; see
+  Changed above for the default-flip and `--strict`). meguard starts a hardened
+  monitor sidecar (its own netns has no route out, only a logging sinkhole) and
+  the sandbox joins that netns via `--network container:<monitor>`. Every
+  outbound TCP connection attempt (to any IP:port, so hardcoded C2 is caught) and
+  DNS query is LOGGED and DROPPED; nothing ever leaves the host. The result
+  section lists blocked attempts (e.g. `BLOCKED tcp 185.220.101.5:443`) and
+  states an explicit "0 outbound attempts" when the repo made none. A new
   `--monitor-image` overrides the monitor image (default `nicolaka/netshoot`;
-  must provide `ip`, `iptables`, `tcpdump`). The sandbox joining the monitor
-  netns gains NO capability; the monitor is the only container granted
-  NET_ADMIN/NET_RAW and runs no repo code. Egress inspection rides on an OPTIONAL
-  `EgressInspector` interface, so the core `Runner` is unchanged and the default
-  path never touches the monitor code.
+  must provide `ip`, `iptables`, `ip6tables`, `tcpdump`+NFLOG). The sandbox
+  joining the monitor netns gains NO capability; the monitor is the only
+  container granted NET_ADMIN/NET_RAW and runs no repo code. Egress inspection
+  rides on an OPTIONAL `EgressInspector` interface, so the core `Runner` is
+  unchanged and the `--strict`/`--network none` path never touches the monitor
+  code.
   - Fail-closed sealing (hardened after a security review): the monitor sets the
     OUTPUT policy to DROP for IPv4 and IPv6 (interface-independent, so it no
     longer depends on the uplink being named `eth0`), logs via NFLOG in-chain
@@ -122,8 +135,9 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 ### Notes
 
 - The `run` binary is pure Go (no cgo) and ships as a single static file.
-- Network is `--network none` by default; no egress. `--inspect-egress` keeps
-  egress denied but makes blocked attempts observable via a monitor sidecar.
+- Egress is always denied. The default `meguard run` inspects (drops + logs)
+  egress via a monitor sidecar; `--strict` uses `--network none` (no stack, no
+  logs). If the monitor cannot start, the CLI falls back to `--network none`.
 - `--memory` and `--cpus` are conservative defaults that will become
   user-configurable.
 - scan, analyzers, and tree-sitter are NOT implemented in this slice.

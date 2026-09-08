@@ -177,4 +177,9 @@ func TestPrintPreRunNoticeInspectEgress(t *testing.T) {
 	if strings.Contains(out, "network DENIED") {
 		t.Errorf("inspected run should not also claim plain DENIED\n  got:\n%s", out)
 	}
+	// Inspection is now the default; the notice must point at --strict as the way
+	// to the hardest no-network mode.
+	if !strings.Contains(out, "--strict") {
+		t.Errorf("inspected notice should mention --strict as the opt-out\n  got:\n%s", out)
+	}
 }

@@ -173,6 +173,19 @@ here.
   rule runs without `|| true`, and the script verifies the policy before echoing
   readiness; `waitForMonitorReady` fails fast if the monitor exits first. The
   feature is labeled experimental and its user-facing text no longer claims
-  unconditional containment until the live-verification pass lands. The
-  default-flip to make inspection the default (with a `--strict`/`--no-network`
-  opt-out) is PARKED until that verification passes.
+  unconditional containment until the live-verification pass lands.
+- Update (default flip, at the maintainer's direction): egress inspection is now
+  the DEFAULT for `meguard run`; the old opt-in `--inspect-egress` flag is
+  removed and `--strict` is the opt-out to `--network none`. Rationale: the
+  product promise is "run it to SEE what it tried", so visibility should be the
+  default experience, not an opt-in. Safety is preserved three ways: (1) egress
+  is denied in BOTH modes; (2) the library zero-value Profile is still
+  `--network none`, so invariant 3 (a forgotten field cannot open a hole) is
+  unchanged - the flip is a CLI default only; (3) because inspected mode is
+  experimental and needs a monitor image + NFLOG, a monitor that cannot start
+  makes the CLI fall back to `--network none` with a warning
+  (`ErrMonitorUnavailable`), never to open egress and never silently. CLAUDE.md
+  invariant 4 is rewritten from "hardcoded `--network none`" to "egress always
+  denied, in one of two modes". The live-verification pass on a Linux host is
+  still outstanding; until it lands, inspected mode stays labeled experimental,
+  and `--strict` is the fully verified mode.

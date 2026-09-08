@@ -21,8 +21,9 @@ The five invariants meguard is built to guarantee:
 3. Sandbox defaults are locked down; configuration only ever RELAXES. The
    zero-value sandbox Profile is the safest one. A forgotten field cannot open a
    hole.
-4. Network is `--network none`. No egress at all. (Opt-in `--inspect-egress`
-   keeps egress fully denied but makes each blocked attempt visible; see below.)
+4. Network egress is always denied. By default meguard runs INSPECTED (egress
+   dropped **and** logged, so you see what a repo tried to reach); `--strict`
+   drops to `--network none` (no stack at all). Neither mode permits egress.
 5. The container is force-removed (`docker rm -f`) on success, install failure,
    panic, or Ctrl-C.
 
@@ -62,7 +63,7 @@ variants, and verification.
 
 ## Usage
 
-    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"] [--runtime CLI] [--inspect-egress]
+    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"] [--runtime CLI] [--strict]
 
 `run` accepts a git URL (cloned to a temp dir that is always cleaned up) or a
 local path (copied, never bind mounted).
@@ -81,8 +82,11 @@ Examples:
     # Rootless runtime (recommended for genuinely hostile code)
     meguard run ./suspicious-repo --runtime podman
 
-    # See what the repo TRIED to reach (every attempt is still blocked)
-    meguard run ./suspicious-repo --inspect-egress
+    # Default already logs what the repo TRIED to reach (every attempt blocked):
+    meguard run ./suspicious-repo
+
+    # Strictest containment: no network stack at all, no egress logs
+    meguard run ./suspicious-repo --strict
 
 meguard prints a pre-run notice listing the active protections and the runtime
 enforcing them, streams the sandbox output under a labeled section, then prints
@@ -93,17 +97,15 @@ Only two values are ecosystem-specific: `--image` (default `node:20-slim`) and
 `--memory` and `--cpus` are conservative internal defaults (2g / 2 CPUs) that
 will become user-configurable; a large install may need more than 2g.
 
-### Inspecting blocked egress (`--inspect-egress`, experimental)
+### Egress logging (default) and `--strict` (experimental default)
 
-By default `--network none` gives the container no network stack at all, so a
-malicious repo cannot phone home - but a blocked attempt also leaves nothing to
-report. `--inspect-egress` opts into a still-no-egress but OBSERVABLE mode: a
-hardened monitor sidecar seals a network namespace **fail-closed** (the OUTPUT
-chain defaults to DROP, for IPv4 and IPv6, so containment does not depend on any
-one route or interface name), the sandbox joins that namespace, and every
-outbound connection attempt (to any IP:port, so hardcoded C2 addresses are caught
-too) plus every DNS lookup is logged via NFLOG and then dropped. You get to see
-what the repo tried:
+By **default**, `meguard run` shows you what a repo tried to reach: a hardened
+monitor sidecar seals a network namespace **fail-closed** (the OUTPUT chain
+defaults to DROP, for IPv4 and IPv6, so containment does not depend on any one
+route or interface name), the sandbox joins that namespace, and every outbound
+connection attempt (to any IP:port, so hardcoded C2 addresses are caught too)
+plus every DNS lookup is logged via NFLOG and then dropped. Egress is still fully
+denied; you just also get to see it:
 
     egress: 2 outbound attempt(s) BLOCKED (logged and dropped; none reached the network):
       - BLOCKED tcp 185.220.101.5:443
@@ -116,13 +118,18 @@ and a `tcpdump` with NFLOG support. The sandbox itself gains no privileges - onl
 the monitor (which runs no repo code) is granted the two network capabilities it
 needs, and `cap-drop ALL` means the sandbox cannot alter the seal.
 
-**Experimental / not yet live-verified.** The Go orchestration, the fail-closed
-ordering, and the parser are unit tested, but the in-container netns/iptables/NFLOG
-mechanics have not yet been verified on a live Linux Docker host (NFLOG needs the
-`nfnetlink_log` kernel module). Until that verification lands, treat
-`--inspect-egress` as experimental and keep the fully verified no-egress default
-(`--network none`) for anything you would not run without a proven seal. Egress
-inspection is off by default so the safest posture stays the default.
+**`--strict` is the strongest, fully-verified mode:** `--network none`, no
+network stack at all, no monitor, no egress logs. Use it for the hardest
+containment or in environments where the monitor image / NFLOG is unavailable.
+
+**Egress logging is EXPERIMENTAL and is now the default.** The Go orchestration,
+the fail-closed ordering, and the parser are unit tested, but the in-container
+netns/iptables/NFLOG mechanics have not yet been verified on a live Linux Docker
+host (NFLOG needs the `nfnetlink_log` kernel module). To keep `meguard run`
+working everywhere in the meantime, **if the monitor cannot start meguard
+automatically falls back to `--network none`** with a printed warning - egress
+stays fully denied, you just lose the logs for that run. Pass `--strict` to skip
+the monitor entirely and get the verified mode directly.
 
 ### Choosing a runtime (the trust boundary)
 

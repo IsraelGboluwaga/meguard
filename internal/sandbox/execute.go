@@ -2,10 +2,19 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
 )
+
+// ErrMonitorUnavailable indicates the egress monitor could not be started or
+// could not seal its netns (missing monitor image, no NFLOG support, readiness
+// timeout, ...). Execute wraps it around any StartMonitor failure so the CLI can
+// distinguish "egress inspection is unavailable on this host" from a real
+// sandbox failure and, since inspection is the default, fall back to the fully
+// verified --network none mode with a warning instead of failing the run.
+var ErrMonitorUnavailable = errors.New("egress monitor unavailable")
 
 // Result summarizes a completed sandbox run.
 type Result struct {
@@ -72,7 +81,9 @@ func Execute(ctx context.Context, r Runner, opts ExecuteOptions) (result Result,
 		inspector = insp
 		monitorName, err = insp.StartMonitor(ctx, p)
 		if err != nil {
-			return Result{}, fmt.Errorf("start egress monitor: %w", err)
+			// Wrap ErrMonitorUnavailable so the caller can fall back to
+			// --network none (still safe) instead of failing the whole run.
+			return Result{}, fmt.Errorf("start egress monitor: %w: %w", ErrMonitorUnavailable, err)
 		}
 		// Guarantee monitor removal on every path. Deferred LIFO ordering means
 		// this runs AFTER the sandbox removal deferred below, so the sandbox

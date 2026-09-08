@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,7 +20,7 @@ func newRunCmd() *cobra.Command {
 	var image string
 	var installCmd string
 	var runtimeBin string
-	var inspectEgress bool
+	var strict bool
 	var monitorImage string
 
 	cmd := &cobra.Command{
@@ -39,12 +40,12 @@ unprivileged user rather than host root.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			return runSandbox(c.Context(), runOptions{
-				source:        args[0],
-				image:         image,
-				installCmd:    installCmd,
-				runtimeBin:    runtimeBin,
-				inspectEgress: inspectEgress,
-				monitorImage:  monitorImage,
+				source:       args[0],
+				image:        image,
+				installCmd:   installCmd,
+				runtimeBin:   runtimeBin,
+				strict:       strict,
+				monitorImage: monitorImage,
 			}, c.OutOrStdout(), c.ErrOrStderr())
 		},
 	}
@@ -58,23 +59,24 @@ unprivileged user rather than host root.`,
 	// shrink the blast radius of a container escape and are preferred for
 	// hostile code.
 	cmd.Flags().StringVar(&runtimeBin, "runtime", "", `Docker-compatible runtime CLI (default "docker"; e.g. "podman" for rootless)`)
-	// Egress inspection RELAXES --network none into a monitored, egress-dropped
-	// network stack so blocked connection attempts are reported. Still no egress:
-	// the monitor logs and drops. Default off keeps the safest posture.
-	cmd.Flags().BoolVar(&inspectEgress, "inspect-egress", false, "[experimental] log outbound connection attempts (still blocked); requires a monitor image with ip/iptables/tcpdump+NFLOG. Not yet verified on a live Linux host")
-	cmd.Flags().StringVar(&monitorImage, "monitor-image", "", "image for the egress monitor sidecar (default nicolaka/netshoot; must provide ip, iptables, tcpdump)")
+	// Egress is DENIED in both modes. By default meguard runs in inspected mode
+	// (egress dropped AND logged via a monitor sidecar) so you can see what a repo
+	// tried to reach. --strict drops to the fully verified --network none (no
+	// network stack at all, no logs) for the hardest containment.
+	cmd.Flags().BoolVar(&strict, "strict", false, "strictest containment: --network none, no network stack at all and no egress logs (default is to log blocked egress)")
+	cmd.Flags().StringVar(&monitorImage, "monitor-image", "", "image for the egress monitor sidecar (default nicolaka/netshoot; must provide ip, iptables, ip6tables, tcpdump+NFLOG)")
 	return cmd
 }
 
 // runOptions groups the flags for a single run so the signature stays readable
 // as options accrue.
 type runOptions struct {
-	source        string
-	image         string
-	installCmd    string
-	runtimeBin    string
-	inspectEgress bool
-	monitorImage  string
+	source       string
+	image        string
+	installCmd   string
+	runtimeBin   string
+	strict       bool
+	monitorImage string
 }
 
 func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) error {
@@ -93,8 +95,11 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 	defer cleanup()
 
 	profile := sandbox.Profile{
-		Image:         o.image,
-		InspectEgress: o.inspectEgress,
+		Image: o.image,
+		// Egress inspection is the DEFAULT; --strict opts down to --network none.
+		// The library zero value (InspectEgress=false) remains the safest one, so
+		// this is a CLI-level default, not a change to invariant 3.
+		InspectEgress: !o.strict,
 		MonitorImage:  o.monitorImage,
 	}
 	// docker exec runs without a shell, so splitting on whitespace is the right
@@ -115,6 +120,23 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 		Stdout:  stdout,
 		Stderr:  stderr,
 	})
+	// Default (inspected) mode is experimental and needs a monitor image + NFLOG.
+	// If the monitor cannot start, fall back to the fully verified --network none
+	// mode with a loud warning rather than failing the run. This never weakens
+	// containment (none is stronger than inspected); it only loses the egress
+	// logs, and the fallback is stated, never silent. --strict skips inspection
+	// entirely, so there is nothing to fall back from.
+	if err != nil && profile.InspectEgress && errors.Is(err, sandbox.ErrMonitorUnavailable) {
+		fmt.Fprintf(stderr, "meguard: egress inspection unavailable (%v)\n", err)
+		fmt.Fprintln(stderr, "meguard: falling back to --network none (egress still fully denied, but no egress logs). Fix the monitor image/runtime for logs, or pass --strict to require this mode.")
+		profile.InspectEgress = false
+		result, err = sandbox.Execute(ctx, runner, sandbox.ExecuteOptions{
+			RepoDir: repoDir,
+			Profile: profile,
+			Stdout:  stdout,
+			Stderr:  stderr,
+		})
+	}
 	if err != nil {
 		return err
 	}
@@ -197,9 +219,9 @@ func printPreRunNotice(w io.Writer, source, runtimeBin string, p sandbox.Profile
 	fmt.Fprintln(w, "  - NO host $HOME and NO repo bind mounts (repo is copied into a container tmpfs)")
 	if p.InspectEgress {
 		fmt.Fprintf(w, "  - network INSPECTED via monitor sidecar (%s): the netns is sealed fail-closed (OUTPUT DROP), every outbound attempt is logged then dropped\n", p.MonitorImageOrDefault())
-		fmt.Fprintln(w, "    [experimental] egress inspection is not yet verified on a live Linux Docker host; the fully verified no-egress mode is the default (--network none, no --inspect-egress)")
+		fmt.Fprintln(w, "    [experimental] egress inspection is not yet verified on a live Linux Docker host; pass --strict for the fully verified --network none mode. If the monitor cannot start, meguard falls back to --network none automatically.")
 	} else {
-		fmt.Fprintln(w, "  - network DENIED (--network none, no egress)")
+		fmt.Fprintln(w, "  - network DENIED (--strict: --network none, no egress, no logs)")
 	}
 	fmt.Fprintln(w, "  - ephemeral: the container is force-removed on exit, panic, or Ctrl-C")
 }
@@ -221,7 +243,7 @@ func printResult(w io.Writer, r sandbox.Result) {
 // case; this only reports what the repo TRIED to do.
 func printEgress(w io.Writer, r sandbox.Result) {
 	if !r.EgressInspected {
-		fmt.Fprintln(w, "egress: not inspected (network fully denied; re-run with --inspect-egress to log blocked attempts)")
+		fmt.Fprintln(w, "egress: not inspected (--network none; egress is fully denied but not logged)")
 		return
 	}
 	if r.Egress == nil {

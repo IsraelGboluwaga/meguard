@@ -179,6 +179,11 @@ func TestExecuteEgressMonitorStartFailsClosed(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "start egress monitor") {
 		t.Fatalf("error = %v, want it to mention 'start egress monitor'", err)
 	}
+	// The error must be identifiable as ErrMonitorUnavailable so the CLI can fall
+	// back to --network none instead of failing the run.
+	if !errors.Is(err, sandbox.ErrMonitorUnavailable) {
+		t.Errorf("error is not ErrMonitorUnavailable: %v", err)
+	}
 	if !reflect.DeepEqual(f.calls, []string{"startMonitor"}) {
 		t.Errorf("calls = %v, want [startMonitor] only (fail closed, no sandbox)", f.calls)
 	}
