@@ -76,30 +76,6 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   output. Frames are plain ASCII; the run binary stays cgo-free (terminal
   detection uses `os.File.Stat`, no external dependency).
 
-### Changed
-
-- Default node image bumped from `node:20-slim` to `node:22-slim`
-  (`sandbox.DefaultImage` in `internal/sandbox/profile.go`; used by
-  `detectNode`). Node 20 reached end-of-life, so the auto-detect default now
-  points at a supported LTS. An explicit `--image` still overrides detection,
-  and the zero-value Profile is unaffected as a security control (image is a
-  RELAX value only; invariant 3). New `TestDefaultImageIsSupportedNodeLTS`
-  (`internal/sandbox/profile_test.go`) pins the default so a future edit
-  cannot silently revert it to an EOL base.
-- The containerized prefetch's npm log now honors compact mode
-  (`cmd/run.go`, `cmd/prefetch.go`). Previously the prefetch leg streamed all
-  of npm's output (`EBADENGINE`/deprecation warnings, the package count) to
-  the terminal on every run, even without `-v`, so a clean run buried its
-  status checklist under a warning wall. It is now captured into a buffer and
-  discarded on success, flushed to stderr only if the prefetch fails (the one
-  case where that log is the diagnostic), and streamed live under a
-  `PREFETCH OUTPUT` header only in `-v` - exactly matching how the in-sandbox
-  install log already behaved. A new `PrefetchOptions.Diag` channel
-  (`internal/sandbox/prefetch.go`) keeps meguard's own prefetch-cleanup
-  diagnostics (a `docker rm -f` failure) on the real stderr regardless, so
-  buffering the npm log can never swallow a cleanup failure (mirrors
-  `ExecuteOptions.Diag`; decision 0017).
-
 ### Security
 
 - Closed the host-arbitrary-file-read class in the node dependency prefetch
@@ -164,9 +140,40 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   command's own Stdout/Stderr. Falls back to `Stderr` when unset, so this is
   additive and does not change behavior for any existing caller that has not
   set it.
+- Default node image bumped from `node:20-slim` to `node:22-slim`
+  (`sandbox.DefaultImage` in `internal/sandbox/profile.go`; used by
+  `detectNode`). Node 20 reached end-of-life, so the auto-detect default now
+  points at a supported LTS. An explicit `--image` still overrides detection,
+  and the zero-value Profile is unaffected as a security control (image is a
+  RELAX value only; invariant 3). New `TestDefaultImageIsSupportedNodeLTS`
+  (`internal/sandbox/profile_test.go`) pins the default so a future edit
+  cannot silently revert it to an EOL base.
+- The containerized prefetch's npm log now honors compact mode
+  (`cmd/run.go`, `cmd/prefetch.go`). Previously the prefetch leg streamed all
+  of npm's output (`EBADENGINE`/deprecation warnings, the package count) to
+  the terminal on every run, even without `-v`, so a clean run buried its
+  status checklist under a warning wall. It is now captured into a buffer and
+  discarded on success, flushed to stderr only if the prefetch fails (the one
+  case where that log is the diagnostic), and streamed live under a
+  `PREFETCH OUTPUT` header only in `-v` - exactly matching how the in-sandbox
+  install log already behaved. A new `PrefetchOptions.Diag` channel
+  (`internal/sandbox/prefetch.go`) keeps meguard's own prefetch-cleanup
+  diagnostics (a `docker rm -f` failure) on the real stderr regardless, so
+  buffering the npm log can never swallow a cleanup failure (mirrors
+  `ExecuteOptions.Diag`; decision 0017).
 
 ### Fixed
 
+- `DockerRunner.Create` (`internal/sandbox/docker.go`) now force-removes the
+  container it just tried to create if the `docker create` CLI invocation
+  itself returns an error. The daemon can create the container even when the
+  CLI call fails (for example the context is cancelled right at that
+  boundary, or a future stdout-parse failure), and `Execute` only registers
+  its cleanup defer once `Create` returns a non-empty id, so a
+  created-but-error container previously leaked. `docker rm -f` on a name
+  that was never actually created is a harmless no-op. Closes a narrow gap in
+  safety invariant 5 (cleanup on every path). New test:
+  `TestCreateRemovesContainerOnFailure`.
 - Ecosystem detection: a repo that is just a bare Python script with no
   manifest (a top-level `*.py` and nothing else, for example a single
   `apalara.py`) is now detected as python (`python:3.12-slim`) instead of

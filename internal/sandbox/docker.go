@@ -88,6 +88,13 @@ func (d DockerRunner) Create(ctx context.Context, p Profile) (string, error) {
 	cmd.Stdout = io.Discard // docker prints the id; we use the name we assigned
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// `docker create` can fail the CLI invocation (e.g. ctx cancelled at the
+		// boundary) after the daemon has already created the container. The
+		// caller only registers its cleanup defer once Create returns a non-empty
+		// id, so remove the container by the name we assigned here, best-effort on
+		// a detached context, before returning. `docker rm -f` on a name that was
+		// never created is a harmless no-op (invariant 5: cleanup on every path).
+		removeDetached(d, name, io.Discard)
 		return "", fmt.Errorf("docker create: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return name, nil
