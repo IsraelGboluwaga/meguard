@@ -51,7 +51,8 @@ also containing and observing the repo.`,
 }
 
 func runScan(ctx context.Context, source string, verbose bool, stdout, stderr io.Writer) error {
-	repoDir, cleanup, err := resolveRepo(ctx, source, stderr)
+	// scan is read-only and never prefetches, so the owned flag is irrelevant here.
+	repoDir, _, cleanup, err := resolveRepo(ctx, source, stderr)
 	if err != nil {
 		return err
 	}

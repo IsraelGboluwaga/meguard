@@ -418,3 +418,155 @@ here.
   `dist/`/`build/` stay walked (invariant unchanged): an attacker could disguise
   a payload as a build artifact, so only the entropy heuristic skips those.
   New tests: extended `TestWalkFilesSkipsNoiseDirs`, `TestIsGeneratedMetadataDir`.
+
+## 0021 - Two-phase install for node; fast-fail and an install timeout everywhere
+
+- Decision (FINAL design; see the update below for how this decision
+  evolved): for `meguard run`, add fast-fail flags to the default install
+  commands for every ecosystem (`--fetch-retries=0` for node,
+  `--retries 0 --timeout 5` for python), add a bounded `--timeout` (default
+  `2m`, `0` disables) that covers both the prefetch and the in-sandbox
+  install (`ExecuteOptions.InstallTimeout` / `PrefetchOptions.Timeout`, new
+  `sandbox.ErrInstallTimeout`), and, for node only, make the install
+  two-phase by default: a CONTAINERIZED prefetch (`npm install
+  --ignore-scripts ...`, run inside its own hardened, throwaway, networked
+  container with no host mounts - `sandbox.RunPrefetch` /
+  `prefetchCreateArgs`) downloads the full dependency tree, then the sandbox
+  installs strictly OFFLINE from that cache with the network still sealed.
+  New `--no-prefetch` opts back into single-phase; an explicit `--cmd` does
+  too.
+- Alternatives: leave the single-phase, network-less install as-is (rejected:
+  the motivating incident - a run stalling 15 minutes because `npm install`
+  retried DNS against the always-denied sandbox network before giving up -
+  is a real usability failure, and worse, because the install never
+  completes, dependency lifecycle scripts never run at all, so meguard could
+  never observe what a MALICIOUS TRANSITIVE DEPENDENCY's `postinstall` tries
+  to do - a real detection gap, not just a slow one); only add the fast-fail
+  flags and a timeout, without two-phase (rejected: fixes the stall but not
+  the detection gap - a fast-failing single-phase install still never runs
+  a single dependency script, since npm cannot begin installing anything
+  without network access to resolve/fetch the tree); prefetch on the HOST
+  with scripts enabled to save a step (rejected outright: that is literally
+  running arbitrary repo/dependency code on the host, a direct breach of
+  invariant 1); prefetch on the HOST with `--ignore-scripts` (TRIED FIRST,
+  then abandoned - see the update below); run the prefetch inside a
+  throwaway, network-enabled container instead (the design actually
+  shipped, after the host approach proved unfixable by string-matching
+  alone).
+- Reason (four parts, as requested):
+  1. Two-phase does not violate invariant 1: the prefetch leg passes
+     `--ignore-scripts`, which suppresses every lifecycle script of the root
+     package AND every dependency, so no repo or dependency code ever
+     executes. Only inert, still-packed tarballs are fetched into a cache as
+     a result. The actual `npm install` that *does* run scripts happens only
+     in the second leg, inside the sealed sandbox, exactly like before.
+  2. The sandbox egress guarantee is completely unchanged: the second leg
+     installs with `--offline` while the network is still fully sealed by
+     the same mechanism as every other run (`--network none` or the
+     fail-closed monitor netns per invariant 4). Two-phase does not add,
+     remove, or weaken any network control on the SEALED sandbox; it only
+     changes WHAT gets a chance to attempt egress there (now every
+     dependency's lifecycle script, not just the root package's), which is
+     the entire point: an attacker who hides a payload in a transitive
+     dependency's `postinstall` is now caught, logged, and dropped instead
+     of never running.
+  3. The prefetch container itself is the one container meguard gives a
+     network, and closing that safely took three iterations:
+     - First cut: prefetch ran on the HOST, guarded by stripping the
+       repo-root `.npmrc` (npm resolves `.npmrc` config even under
+       `--ignore-scripts`, and a hostile one could redirect the registry,
+       proxy through an attacker host for SSRF, or interpolate `${ENV_VAR}`
+       to exfiltrate a host secret), a minimal secret-free environment (only
+       `PATH`, an isolated temp `HOME`, `GIT_ALLOW_PROTOCOL=https:http`; not
+       `os.Environ()`), a pinned registry on the command line, and declining
+       prefetch below npm major version 9.
+     - A second security review found that `--ignore-scripts` does NOT stop
+       npm from resolving a `file:`/`link:`/`portal:`/bare-path dependency
+       spec, which reads and copies the referenced HOST path into
+       `node_modules` during install with no script needed at all (e.g. an
+       absolute `file:/etc/passwd` in `package.json`) - a host
+       arbitrary-file-read, breaching invariant 2. The host-prefetch design
+       was patched to parse the manifest and lockfiles read-only and decline
+       to single-phase whenever any local dependency spec was present.
+     - A third review showed a fixed-prefix allowlist for that parsing was
+       too narrow: npm resolves ANY spec containing a path separator as a
+       local install, so `x/../../etc` (no `file:` prefix) still escaped.
+       The detection was broadened to mirror npm's own resolver (any
+       separator or local-tarball suffix that is not a URL or `npm:` alias),
+       `workspaces` globs were parsed for escapes, and a positive post-hoc
+       check resolved every installed entry with `EvalSymlinks` to verify
+       nothing landed outside the repo.
+     - A FOURTH review (the one that ended the host approach) concluded that
+       npm's local-dependency-spec surface is open-ended enough - `file:`,
+       bare paths, `overrides`, `workspaces`, lockfile entries, and whatever
+       resolver behavior a future npm version adds - that a host-side
+       allowlist could not be trusted to have closed the class completely,
+       only the instances tried so far. The fix was moved from detection to
+       structure: the prefetch now runs `npm install --ignore-scripts`
+       inside its OWN hardened, throwaway, NETWORKED container
+       (`prefetchCreateArgs`, sharing `baseHardeningArgs` with the sealed
+       sandbox and differing only in `--network bridge` vs `--network
+       none`), which has NO host bind mounts. A malicious local dependency
+       spec of any shape now resolves only against the CONTAINER's own
+       filesystem - the host-file-read class is structurally impossible,
+       not something meguard has to keep re-discovering forms of and
+       guarding against. It is still safe to give this one container a
+       network for the same reason as the host design: `--ignore-scripts`
+       means no repo or dependency code ever runs, so the untrusted repo
+       can never use that network itself. All the host-side machinery from
+       the three earlier iterations (`.npmrc` stripping, the minimal
+       environment, the npm-version gate, `isLocalSpec`/
+       `manifestHasLocalDeps`/`nodeModulesEscapes`) has been removed; it is
+       superseded, not layered on top of, the container. Only the populated
+       npm cache (never `node_modules`) is copied back out of the prefetch
+       container, via a tar stream through `docker exec`
+       (`copyCacheOut`/`untarInto`) since `/repo` is a tmpfs and `docker cp`
+       cannot read it - the same reason the repo is copied IN via a tar
+       stream rather than `docker cp`. Because that tar is produced over a
+       subtree whose bytes originate from the untrusted repo and is extracted
+       on the HOST, `untarInto` materializes ONLY directories and regular
+       files and validates each entry name stays within the destination; it
+       SKIPS symlink entries entirely (a fifth review flagged that recreating
+       an attacker-chosen symlink target such as `.meguard-cache/x ->
+       ~/.ssh/id_rsa` would be a host symlink-plant / CWE-59), which an npm
+       cache never needs. The `--ignore-scripts` no-execution claim was
+       verified on the actual image (node:20-slim ships npm 10.8.2): with
+       `--ignore-scripts`, none of preinstall/install/postinstall/prepare/
+       prepublish run, so no repo or dependency code executes in the networked
+       prefetch container.
+  4. Node-only is deliberate, not an oversight: node's `--ignore-scripts`
+     has a real, provably-no-code-execution mode, so it is safe to prefetch
+     with a network at all. Python has no equivalent - `pip download`/
+     `pip wheel` execute a source distribution's `setup.py` to resolve
+     metadata, which IS code execution outside the sealed sandbox - so
+     python intentionally stays single-phase, gaining only the fast-fail and
+     timeout fixes. A contained (sandboxed) Python prefetch that sidesteps
+     this is future work.
+- Implementation notes: prefetch is best-effort throughout
+  (`prefetchOutcome` in `cmd/prefetch.go`) - any failure (staging, the
+  prefetch container itself, or a timeout) falls back to the ecosystem's
+  single-phase install with a stated reason, never a hard failure of the
+  run. A repo passed as a local path is staged into a fresh temp copy before
+  prefetch (`stageForMutation`), since the populated cache is copied back
+  into that staging dir, so meguard never mutates the user's working tree; a
+  git clone is already an owned temp copy. The cache (`sandbox.CacheDirName`,
+  `.meguard-cache`) lives inside the staged repo dir on the host once copied
+  out of the prefetch container, so it travels into the SEALED sandbox with
+  the existing tar-copy mechanism with no new mount, and the static scan's
+  directory skip list was extended to exclude it (inert compressed blobs,
+  pure noise for the analyzers).
+- Update (final design, containerized prefetch): superseded the host-side
+  prefetch entirely, as detailed in reason 3 above. The host approach was
+  abandoned after four security-review iterations because npm's local
+  dependency-spec resolution surface (`file:`, bare paths, `overrides`,
+  `workspaces`, lockfile entries) is open-ended enough that a host-side
+  allowlist could not be trusted to have closed it completely, only the
+  forms tried. Running the prefetch inside a throwaway, no-host-mount
+  container instead closes the class STRUCTURALLY: any local spec resolves
+  against the container's own filesystem, never the host's, while
+  `--ignore-scripts` still guarantees no repo code runs on that networked
+  container, and the sealed sandbox's `--network none`/monitored egress
+  denial (invariant 4) is completely unaffected. New
+  `TestPrefetchCreateArgsHardening` (`internal/sandbox/args_test.go`) locks
+  in that the prefetch container keeps every unconditional hardening flag
+  the sealed sandbox has and differs only by network mode.

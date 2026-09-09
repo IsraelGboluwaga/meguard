@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/IsraelGboluwaga/meguard/internal/sandbox"
 )
@@ -401,5 +402,100 @@ func TestExecuteDiagFallsBackToStderrWhenUnset(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cleanup failed") {
 		t.Errorf("Stderr = %q, want it to mention the cleanup failure (Diag unset)", stderr.String())
+	}
+}
+
+// blockingRunner is a Runner test double whose Exec blocks until its context is
+// cancelled, so InstallTimeout's behavior can be exercised without a container
+// daemon or a real hung process. Create/Start/CopyInto/Remove all succeed
+// immediately; only Exec (the install step) blocks.
+type blockingRunner struct {
+	removeCalls int
+	removeErr   error
+}
+
+func (b *blockingRunner) Create(_ context.Context, _ sandbox.Profile) (string, error) {
+	return "blocking-id", nil
+}
+func (b *blockingRunner) CopyInto(_ context.Context, _, _, _ string) error { return nil }
+func (b *blockingRunner) Start(_ context.Context, _ string) error          { return nil }
+
+// Exec blocks until ctx is done, then returns ctx.Err() as its error, mirroring
+// how a real exec.CommandContext-backed runner reports a killed-by-timeout exec.
+func (b *blockingRunner) Exec(ctx context.Context, _ string, _ []string, _, _ io.Writer) (int, error) {
+	<-ctx.Done()
+	return -1, ctx.Err()
+}
+
+func (b *blockingRunner) Remove(_ context.Context, _ string) error {
+	b.removeCalls++
+	return b.removeErr
+}
+
+// TestExecuteInstallTimeout is table-driven over InstallTimeout: a short timeout
+// must cancel a hung install, surface ErrInstallTimeout (checked with errors.Is
+// per Go convention, not a string match), and STILL force-remove the container
+// (invariant 5: cleanup runs on install failure, including a timeout). A zero
+// InstallTimeout must never time out a slow-but-finite install; that case uses a
+// fakeRunner (not the always-blocking one) so the run can actually complete.
+func TestExecuteInstallTimeout(t *testing.T) {
+	tests := []struct {
+		name           string
+		installTimeout time.Duration
+		wantTimeout    bool
+	}{
+		{
+			name:           "short timeout on a hung install returns ErrInstallTimeout and still cleans up",
+			installTimeout: 20 * time.Millisecond,
+			wantTimeout:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &blockingRunner{}
+			o := opts()
+			o.InstallTimeout = tt.installTimeout
+
+			_, err := sandbox.Execute(context.Background(), r, o)
+
+			if tt.wantTimeout {
+				if err == nil {
+					t.Fatal("Execute error = nil, want ErrInstallTimeout")
+				}
+				if !errors.Is(err, sandbox.ErrInstallTimeout) {
+					t.Errorf("error = %v, want it to wrap sandbox.ErrInstallTimeout", err)
+				}
+			} else if err != nil {
+				t.Fatalf("Execute error = %v, want nil", err)
+			}
+
+			if r.removeCalls != 1 {
+				t.Errorf("Remove called %d times, want 1 (invariant 5: cleanup runs on install timeout)", r.removeCalls)
+			}
+		})
+	}
+}
+
+// InstallTimeout == 0 means no timeout: an install that finishes on its own,
+// however long it notionally could have run, must not be cancelled or reported
+// as ErrInstallTimeout.
+func TestExecuteInstallTimeoutZeroMeansNoTimeout(t *testing.T) {
+	f := &fakeRunner{execCode: 0}
+	o := opts()
+	o.InstallTimeout = 0
+
+	res, err := sandbox.Execute(context.Background(), f, o)
+	if err != nil {
+		t.Fatalf("Execute error = %v, want nil (InstallTimeout 0 means no timeout)", err)
+	}
+	if errors.Is(err, sandbox.ErrInstallTimeout) {
+		t.Error("got ErrInstallTimeout with InstallTimeout == 0")
+	}
+	if res.InstallExitCode != 0 {
+		t.Errorf("InstallExitCode = %d, want 0", res.InstallExitCode)
+	}
+	if f.removeCalls != 1 {
+		t.Errorf("Remove called %d times, want 1", f.removeCalls)
 	}
 }
