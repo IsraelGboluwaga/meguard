@@ -172,6 +172,16 @@ run after any return and during panic unwinding, and the detached context is not
 cancelled when the caller's ctx is (Ctrl-C). So `docker rm -f` runs on success,
 on install failure, on panic, and on Ctrl-C.
 
+`DockerRunner.Create` closes one more gap in that guarantee: if the `docker
+create` CLI invocation itself fails (for example the context is cancelled right
+at that boundary, or a future stdout-parse failure), the daemon can still have
+created the container before the CLI call returned an error. Because `Execute`
+only registers its cleanup defer once `Create` returns a non-empty id, such a
+container would otherwise leak. `Create` now force-removes it by the name
+meguard assigned (`removeDetached`, best-effort, on a detached context) before
+returning the error. `docker rm -f` on a name the daemon never actually created
+is a harmless no-op, so this is safe to run unconditionally on the failure path.
+
 `ExecuteOptions.InstallTimeout` (default `2m` from the CLI's `--timeout` flag,
 `0` disables) bounds ONLY the install exec, not create/start/copy. When it
 elapses, `Execute` cancels the install's exec context and returns

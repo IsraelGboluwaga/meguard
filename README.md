@@ -31,7 +31,8 @@ The five invariants meguard is built to guarantee:
    dropped **and** logged, so you see what a repo tried to reach); `--strict`
    drops to `--network none` (no stack at all). Neither mode permits egress.
 5. The container is force-removed (`docker rm -f`) on success, install failure,
-   panic, or Ctrl-C.
+   panic, or Ctrl-C, and also if `docker create` itself fails after the daemon
+   already created it.
 
 Under the hood, each `run` create these hardening controls on the container:
 non-root user, all capabilities dropped, `no-new-privileges`, read-only root

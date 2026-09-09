@@ -143,6 +143,16 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ### Fixed
 
+- `DockerRunner.Create` (`internal/sandbox/docker.go`) now force-removes the
+  container it just tried to create if the `docker create` CLI invocation
+  itself returns an error. The daemon can create the container even when the
+  CLI call fails (for example the context is cancelled right at that
+  boundary, or a future stdout-parse failure), and `Execute` only registers
+  its cleanup defer once `Create` returns a non-empty id, so a
+  created-but-error container previously leaked. `docker rm -f` on a name
+  that was never actually created is a harmless no-op. Closes a narrow gap in
+  safety invariant 5 (cleanup on every path). New test:
+  `TestCreateRemovesContainerOnFailure`.
 - Ecosystem detection: a repo that is just a bare Python script with no
   manifest (a top-level `*.py` and nothing else, for example a single
   `apalara.py`) is now detected as python (`python:3.12-slim`) instead of
