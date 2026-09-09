@@ -110,7 +110,7 @@ the app builds or starts, not at dependency-install time. See
 
 Examples:
 
-    # Node repo (package.json): auto-detected, runs `npm install` in node:20-slim
+    # Node repo (package.json): auto-detected, runs `npm install` in node:22-slim
     meguard run https://github.com/some/suspicious-repo.git
 
     # A local path
@@ -158,7 +158,10 @@ By default `run` prints a COMPACT report: a per-stage status checklist
 ✓/!/✗ glyphs), a "Top findings" block listing every High/Critical scan finding
 individually (capped at 8, with everything else rolled into one "... N more"
 line), and a single free-text `RESULT: ...` sentence. The raw install log is
-captured but not printed unless the install exited non-zero. While the slow
+captured but not printed unless the install exited non-zero. The containerized
+prefetch's npm log (its `EBADENGINE`/deprecation warnings and package count) is
+captured the same way and shown only if the prefetch itself fails; a clean
+prefetch adds nothing but its one status line. While the slow
 stages run (the containerized prefetch, the static scan, and the in-container
 install) a spinner animates on stderr so the tool does not look frozen; it disappears
 when stderr is not a terminal, so piped output stays clean. For example,
@@ -166,7 +169,7 @@ against a repo with a malicious `postinstall` hook on a transitive dependency:
 
     meguard run <repo>
 
-    ✓ sandbox    node:20-slim, network denied (--strict, no logs), ephemeral
+    ✓ sandbox    node:22-slim, network denied (--strict, no logs), ephemeral
     ✓ prefetch   dependencies fetched in a no-host-mount container (no scripts run); deps install in-box
     ✓ install    npm install --offline --no-audit --no-fund --cache /repo/.meguard-cache (exit 0)
     ✓ exec       ran build (exit 0), start (observed then stopped)
@@ -183,7 +186,8 @@ against a repo with a malicious `postinstall` hook on a transitive dependency:
 
 Pass `-v`/`--verbose` to restore the full report: the `meguard: preparing
 locked-down sandbox` header with the active-protections rationale, every scan
-finding listed individually with its snippet, and the streamed sandbox output.
+finding listed individually with its snippet, and the streamed prefetch and
+sandbox output (each under its own header).
 Nothing about detection or containment differs between the two modes; this is
 presentation only. Exit codes, `--fail-on-scan`, and `--no-scan` behave
 identically either way.
@@ -200,7 +204,7 @@ defaults, so run it with an explicit `--image` and `--cmd`.
 
 | Detected | Markers (any) | Image | Install command (single-phase / fast-fail fallback) |
 | --- | --- | --- | --- |
-| node | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` | `node:20-slim` | `npm install --no-audit --no-fund --fetch-retries=0` |
+| node | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` | `node:22-slim` | `npm install --no-audit --no-fund --fetch-retries=0` |
 | python | `requirements.txt` | `python:3.12-slim` | `pip install --user --retries 0 --timeout 5 -r requirements.txt` |
 | python | `pyproject.toml`, `setup.py`, `setup.cfg`, `Pipfile` | `python:3.12-slim` | `pip install --user --retries 0 --timeout 5 .` |
 | python | any top-level `*.py` (no manifest) | `python:3.12-slim` | `python --version` (no-op) |
@@ -212,7 +216,7 @@ image instead of defaulting to node and running `npm install` against a missing
 `package.json`): there is nothing to install, so the install command is a no-op
 that runs no repo code. Run the script itself with an explicit `--cmd` (for
 example `--cmd "python apalara.py"`). When nothing matches at all, meguard falls
-back to the locked-down defaults (`node:20-slim` / `npm install --fetch-retries=0`).
+back to the locked-down defaults (`node:22-slim` / `npm install --fetch-retries=0`).
 An explicit `--image` or `--cmd` always overrides detection for that value; pip
 uses `--user` so installs land on the writable HOME tmpfs under the read-only
 root. The `--fetch-retries=0` / `--retries 0 --timeout 5` flags are the

@@ -31,9 +31,18 @@ type PrefetchOptions struct {
 	InstallArgs []string
 	// Timeout bounds the in-container prefetch exec. Zero means no timeout.
 	Timeout time.Duration
-	// Stdout and Stderr receive the prefetch command's streamed output.
+	// Stdout and Stderr receive the prefetch command's streamed output. A compact
+	// CLI run buffers these and discards them on success (the npm log is noise on a
+	// clean prefetch), so they must carry ONLY the command's own output.
 	Stdout io.Writer
 	Stderr io.Writer
+	// Diag receives meguard's OWN operational diagnostics for the prefetch (the
+	// container cleanup / `docker rm -f` failure), separate from the command output
+	// above. It must point at the real stderr even when Stdout/Stderr are buffered,
+	// so a cleanup failure is never swallowed by a discarded buffer on an otherwise
+	// successful prefetch (mirrors ExecuteOptions.Diag; see decision 0017). When
+	// nil it falls back to Stderr.
+	Diag io.Writer
 }
 
 // RunPrefetch runs the dependency prefetch inside a hardened, NETWORKED,
@@ -53,6 +62,11 @@ type PrefetchOptions struct {
 func (d DockerRunner) RunPrefetch(ctx context.Context, opts PrefetchOptions) error {
 	p := Profile{Image: opts.Image}.Normalize()
 
+	diag := opts.Diag
+	if diag == nil {
+		diag = opts.Stderr
+	}
+
 	name, err := containerName()
 	if err != nil {
 		return err
@@ -68,7 +82,7 @@ func (d DockerRunner) RunPrefetch(ctx context.Context, opts PrefetchOptions) err
 	}
 	// Guarantee removal on every path (success, failure, panic, Ctrl-C), using a
 	// detached, time-bounded context so a cancelled run still cleans up.
-	defer removeDetached(d, name, opts.Stderr)
+	defer removeDetached(d, name, diag)
 
 	if err := d.Start(ctx, name); err != nil {
 		return err

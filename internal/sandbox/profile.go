@@ -66,7 +66,7 @@ type Profile struct {
 // Conservative defaults. These are ceilings and ecosystem choices only; none of
 // them relaxes an isolation boundary.
 const (
-	DefaultImage     = "node:20-slim"
+	DefaultImage     = "node:22-slim"
 	DefaultMemory    = "2g"
 	DefaultCPUs      = "2"
 	DefaultPidsLimit = 512

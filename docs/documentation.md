@@ -86,7 +86,7 @@ field, so:
 - Configuration only ever RELAXES ceilings or selects an ecosystem; it can never
   weaken isolation.
 
-`Normalize` fills empty fields with conservative defaults (node:20-slim,
+`Normalize` fills empty fields with conservative defaults (node:22-slim,
 `npm install`, 2g, 2 CPUs, 512 PIDs) and never removes a control.
 
 `InspectEgress` follows the same rule at the library level: its zero value is
@@ -108,7 +108,7 @@ of detectors; the first whose marker files exist at the repo root wins:
 
 | Detected | Markers (any) | Image | Install command (single-phase / fast-fail fallback) |
 | --- | --- | --- | --- |
-| node | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` | `node:20-slim` | `npm install --no-audit --no-fund --fetch-retries=0` |
+| node | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` | `node:22-slim` | `npm install --no-audit --no-fund --fetch-retries=0` |
 | python | `requirements.txt` | `python:3.12-slim` | `pip install --user --retries 0 --timeout 5 -r requirements.txt` |
 | python | `pyproject.toml`, `setup.py`, `setup.cfg`, `Pipfile` | `python:3.12-slim` | `pip install --user --retries 0 --timeout 5 .` |
 | python | any top-level `*.py` (no manifest) | `python:3.12-slim` | `python --version` (no-op) |
@@ -317,6 +317,19 @@ copy-cache-out), or a timeout all fall back to the ecosystem's single-phase
 `InstallCmd` with a stated reason, never a hard failure of the run.
 `printCompactPrefetchLine` renders the outcome as the compact report's
 `prefetch` status line.
+
+The prefetch command's own npm log follows the same compact-vs-verbose rule as
+the in-sandbox install log. In compact mode `cmd/run.go` passes a `bytes.Buffer`
+as the prefetch output sink and discards it on success, flushing it to stderr
+only when the prefetch fails (the one case where its `EBADENGINE`/deprecation
+warnings and error output are the thing to debug); `-v` streams it live under a
+`PREFETCH OUTPUT` header instead. This is why a clean run no longer prints npm's
+warning wall. Crucially, that output sink carries ONLY the command's own stdio:
+`PrefetchOptions.Diag` (`internal/sandbox/prefetch.go`) is a separate channel
+for meguard's own prefetch-cleanup diagnostics (a `docker rm -f` failure), wired
+to the real stderr regardless of `-v`, so a cleanup failure is never swallowed
+by the discarded buffer on an otherwise successful prefetch. This mirrors
+`ExecuteOptions.Diag` for the sealed install (decision 0017).
 
 A repo passed as a local path is staged into a fresh temp copy before
 prefetch runs (`stageForMutation` in `cmd/prefetch.go`; prefetch's populated
@@ -722,8 +735,9 @@ Docker/container code at all.
 `cmd/run.go` calls `analyze.Scan` on the resolved repo dir on the HOST,
 read-only, before any container work (same trust tier as
 `sandbox.DetectEcosystem`), and folds the findings into the same report
-(compact by default; the full STATIC SCAN section, between the pre-run
-notice and the SANDBOX OUTPUT section, under `-v`). Findings are ADVISORY: the
+(compact by default; the full STATIC SCAN section, after the pre-run notice
+and the PREFETCH OUTPUT section and before the SANDBOX OUTPUT section, under
+`-v`). Findings are ADVISORY: the
 sandboxed run proceeds regardless of what scan found (containment, not scan,
 is the safety net), unless `--fail-on-scan` is set, which exits non-zero
 after the run completes if any High/Critical finding was reported. `--no-scan`

@@ -38,7 +38,12 @@ type prefetchOutcome struct {
 // Detail, and the caller falls back to the single-phase (fail-fast) install.
 // repoDir must be a directory meguard owns (a clone temp or a staged copy) so the
 // copied-back cache never lands in the user's working tree.
-func runPrefetch(ctx context.Context, runner sandbox.DockerRunner, eco sandbox.Ecosystem, repoDir string, timeout time.Duration, stderr io.Writer) prefetchOutcome {
+// out receives the prefetch command's own streamed output (the npm log). In a
+// compact run the caller passes a buffer it discards on success and flushes only
+// if prefetch fails, so a clean prefetch's npm noise never reaches the terminal;
+// diag is meguard's own diagnostic channel (cleanup failures) and must always be
+// the real stderr, even when out is buffered.
+func runPrefetch(ctx context.Context, runner sandbox.DockerRunner, eco sandbox.Ecosystem, repoDir string, timeout time.Duration, out, diag io.Writer) prefetchOutcome {
 	if len(eco.PrefetchCmd) == 0 {
 		return prefetchOutcome{Attempted: false, Detail: fmt.Sprintf("%s: no prefetch (single-phase; sandbox has no network)", eco.Name)}
 	}
@@ -52,10 +57,12 @@ func runPrefetch(ctx context.Context, runner sandbox.DockerRunner, eco sandbox.E
 		RepoDir:     repoDir,
 		InstallArgs: args,
 		Timeout:     timeout,
-		// The prefetch tool's own output is a diagnostic; send it to stderr so a
-		// compact run stays clean but a failure is debuggable.
-		Stdout: stderr,
-		Stderr: stderr,
+		// The prefetch tool's own output (the npm log) goes to out, which a compact
+		// run buffers and discards on success. Cleanup diagnostics go to diag, which
+		// is always the real stderr, so a `docker rm -f` failure is never lost.
+		Stdout: out,
+		Stderr: out,
+		Diag:   diag,
 	})
 	if err != nil {
 		return prefetchOutcome{Attempted: true, OK: false, Detail: fmt.Sprintf("prefetch failed (%v); falling back to single-phase install", err)}
@@ -67,7 +74,7 @@ func runPrefetch(ctx context.Context, runner sandbox.DockerRunner, eco sandbox.E
 	// install rebuilds it fresh from the cache so every lifecycle script runs
 	// there. Best effort.
 	if rmErr := os.RemoveAll(filepath.Join(repoDir, "node_modules")); rmErr != nil {
-		fmt.Fprintf(stderr, "meguard: could not clear staged node_modules before sandbox install: %v\n", rmErr)
+		fmt.Fprintf(diag, "meguard: could not clear staged node_modules before sandbox install: %v\n", rmErr)
 	}
 
 	return prefetchOutcome{Attempted: true, OK: true, Detail: fmt.Sprintf("%s dependencies prefetched in a networked, no-host-mount container (no scripts run)", eco.Name)}

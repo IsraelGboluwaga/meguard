@@ -20,7 +20,7 @@ trust boundary meguard relies on. Prefer Podman rootless where isolation matters
 most. Stronger backends (gVisor, Firecracker) are on the roadmap.
 
 The container image used by `run` must provide `tar`, which meguard uses to
-stream the repo into the sandbox tmpfs. The defaults (node:20-slim) and other
+stream the repo into the sandbox tmpfs. The defaults (node:22-slim) and other
 Debian/Alpine-based images include it.
 
 For a node repo, `run` also does a containerized dependency prefetch by

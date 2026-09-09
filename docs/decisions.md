@@ -594,7 +594,46 @@ here.
   (`internal/sandbox/docker_test.go`), a fake `docker` script that fails
   `create` and records that `rm -f meguard-...` is invoked next.
 
-## 0023 - Runtime execution phase for `meguard run` (default on)
+## 0023 - Prefetch npm log honors compact mode; default node image to a supported LTS
+
+- Decision: two small follow-ups to the two-phase install (decision 0021) and
+  compact output (decision 0017), prompted by a real run whose terminal was
+  dominated by npm noise it should not have shown.
+  - The containerized prefetch leg now buffers its own npm output the same way
+    the in-sandbox install log already did: captured in compact mode and
+    discarded on success, flushed to stderr only if the prefetch fails, and
+    streamed live under a `PREFETCH OUTPUT` header only under `-v`. Previously
+    `runPrefetch` wired the prefetch command's stdout+stderr straight to the
+    real stderr unconditionally, so every run - even a clean, compact one -
+    printed npm's full `EBADENGINE`/deprecation wall and package count,
+    burying the status checklist. Its own code comment even claimed "a compact
+    run stays clean," which it did not. This is presentation only; nothing
+    about what the prefetch does changed.
+  - A new `PrefetchOptions.Diag` writer carries meguard's own prefetch-cleanup
+    diagnostics (a `docker rm -f` failure) on the real stderr regardless of
+    `-v` or the buffering, so the captured npm buffer can never swallow a
+    cleanup failure on an otherwise successful prefetch. This is the exact
+    split decision 0017 established for `ExecuteOptions.Diag`; applying the
+    same rule to the prefetch leg keeps invariant 5's cleanup diagnostics
+    visible.
+  - The default node image moved from `node:20-slim` to `node:22-slim`
+    (`sandbox.DefaultImage`). Node 20 reached end-of-life, so auto-detection
+    was defaulting untrusted repos onto an unsupported base. `node:22-slim` is
+    the current active LTS. The image is a RELAX value only (invariant 3): the
+    zero-value Profile is unaffected as a security control, and an explicit
+    `--image` still wins. `TestDefaultImageIsSupportedNodeLTS` pins the new
+    default so a later edit cannot silently regress it to an EOL base.
+- Alternatives: keep streaming the prefetch log and tell users to ignore it
+  (rejected: it defeats the whole point of compact mode, and the noise is per
+  transitive dependency so it scales with the repo); leave the default at
+  node:20-slim and only bump per-run with `--image` (rejected: shipping an
+  EOL default is exactly the stale default a security tool should not carry,
+  and the warnings a mismatched engine produces are themselves noise);
+  reuse the existing `Stderr` field for cleanup diagnostics instead of adding
+  `Diag` (rejected: that is the field being buffered away, which is the bug
+  decision 0017 already ruled out for the sealed install).
+
+## 0024 - Runtime execution phase for `meguard run` (default on)
 
 - Decision: after a SUCCESSFUL install (exit code 0), `run` now executes the
   repo at runtime inside the SAME sealed container by default, so a payload
