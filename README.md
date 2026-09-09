@@ -158,7 +158,10 @@ By default `run` prints a COMPACT report: a per-stage status checklist
 ✓/!/✗ glyphs), a "Top findings" block listing every High/Critical scan finding
 individually (capped at 8, with everything else rolled into one "... N more"
 line), and a single free-text `RESULT: ...` sentence. The raw install log is
-captured but not printed unless the install exited non-zero. The containerized
+captured but not printed unless the install exited non-zero (and not even then
+when the prefetch already failed: its log is the root cause, and the sealed
+offline fallback's `EAI_AGAIN` is a foregone downstream error, so that redundant
+second log is suppressed). The containerized
 prefetch's npm log (its `EBADENGINE`/deprecation warnings and package count) is
 captured the same way and shown only if the prefetch itself fails; a clean
 prefetch adds nothing but its one status line. While the slow

@@ -8,6 +8,19 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ## [Unreleased]
 
+### Changed
+
+- Compact `meguard run` no longer prints the raw sealed-install log when the
+  containerized prefetch already failed (`cmd/run.go`). When prefetch fails,
+  its npm log is flushed as the root-cause diagnostic, and the single-phase
+  fallback then installs strictly offline with an unpopulated cache and no
+  network, so it fails with a foregone `getaddrinfo`/`EAI_AGAIN` error whose
+  actual cause is the prefetch failure already shown. Dumping that second log
+  stacked redundant noise on top of the real cause. The compact report's
+  `prefetch` and `install` status lines still record that both failed, and
+  `-v`/`--verbose` still streams every log live. The git clone progress and
+  the install-failure log for a non-prefetch failure are unchanged.
+
 ### Added
 
 - Runtime execution phase for `meguard run`, on by default
