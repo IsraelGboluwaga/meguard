@@ -776,7 +776,13 @@ the install failed so the phase was skipped). `run` no longer echoes the invoked
 user typed); `scan`'s only header is the fixed `meguard scan (no container;
 read-only)` mode line. The raw install log (`run` only) is captured but not
 printed unless the install exited non-zero, in which case it is dumped under
-an `INSTALL LOG (install exited non-zero)` section.
+an `INSTALL LOG (install exited non-zero)` section. The one exception: when the
+containerized prefetch already failed, its npm log is flushed as the root-cause
+diagnostic and the sealed single-phase fallback then fails with a foregone
+`getaddrinfo`/`EAI_AGAIN` error (no network, unpopulated cache) whose cause is
+the prefetch failure already shown, so that redundant second log is suppressed
+(guarded by `!prefetchFailed` in `cmd/run.go`; the compact report's `prefetch`
+and `install` status lines still record that both failed). See decision 0025.
 
 While the slow, otherwise-silent stages run (the static scan, and, for `run`,
 the in-container install) a spinner animates a single in-place line on stderr

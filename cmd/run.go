@@ -383,7 +383,15 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 	if o.verbose {
 		printResult(stdout, result, execSteps, !o.noScan, scanReport)
 	} else {
-		if result.InstallExitCode != 0 && installLog.Len() > 0 {
+		// When the containerized prefetch already failed, its npm log was flushed
+		// above as the root-cause diagnostic. The sealed single-phase fallback then
+		// runs with no network and an unpopulated cache, so it fails with a
+		// foregone getaddrinfo/EAI_AGAIN error whose actual cause is the prefetch
+		// failure already shown. Dumping that second log stacks redundant noise on
+		// top of the real cause, so suppress it in that case; the compact report's
+		// prefetch and install lines still record that both failed.
+		prefetchFailed := prefetch.Attempted && !prefetch.OK
+		if result.InstallExitCode != 0 && installLog.Len() > 0 && !prefetchFailed {
 			fmt.Fprintln(stdout, sectionRule)
 			fmt.Fprintln(stdout, "INSTALL LOG (install exited non-zero)")
 			fmt.Fprintln(stdout, sectionRule)

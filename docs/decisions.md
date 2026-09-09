@@ -679,3 +679,34 @@ here.
   then. Egress is now collected once after the LAST runtime step (not just
   after install), so a single report covers install, build, and run
   together.
+
+## 0025 - Suppress the sealed-install log when prefetch already failed
+
+- Decision: on the compact (non--verbose) path, `meguard run` no longer dumps
+  the raw sealed-install log when the containerized prefetch (decision 0021)
+  already failed. Prompted by a real run against a repo with a peer-dependency
+  conflict: prefetch failed with `ERESOLVE`, its npm log was flushed as the
+  root-cause diagnostic (decision 0023), and then the single-phase fallback
+  installed strictly OFFLINE inside the sealed, network-less sandbox from an
+  unpopulated cache, so it failed with a foregone `getaddrinfo`/`EAI_AGAIN`
+  error whose actual cause was the prefetch failure already shown above it.
+  The terminal therefore carried TWO npm logs for one failure: the real cause
+  (ERESOLVE) and a redundant downstream consequence (EAI_AGAIN). `cmd/run.go`
+  now guards the `INSTALL LOG (install exited non-zero)` block with
+  `!prefetchFailed` (`prefetch.Attempted && !prefetch.OK`), so the second log
+  is suppressed exactly when the prefetch log has already explained the
+  failure. The compact report's `prefetch` and `install` status lines still
+  record that both failed, so nothing is hidden about WHAT happened, only the
+  redundant second log is dropped.
+- Alternatives: also silence the `git clone` progress in compact mode
+  (rejected by the maintainer: the clone output is wanted and stays as-is);
+  suppress the install log for ANY install failure, not just a
+  prefetch-triggered one (rejected: when prefetch did NOT run or succeeded, the
+  install log is the primary and only diagnostic, so it must still show); print
+  a one-line pointer back to the prefetch log instead of nothing (rejected as
+  unnecessary: the compact report's `! prefetch` and `x install` lines already
+  make the two-stage failure legible, and `-v` still streams every log live).
+- Reason: presentation only, in the same spirit as decisions 0017 and 0023 -
+  nothing about detection, containment, or the five invariants changes; a
+  compact run should surface the single log that explains the failure, not
+  stack a foregone downstream error on top of the real cause.
