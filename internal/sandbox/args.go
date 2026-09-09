@@ -39,8 +39,19 @@ import "strconv"
 // ALL, so it cannot alter them. Every other flag above is unconditional.
 func createArgs(name string, p Profile) []string {
 	p = p.Normalize()
-	netMode := networkArgs(p)
-	args := []string{
+	args := baseHardeningArgs(name, p)
+	args = append(args, networkArgs(p)...)
+	args = append(args, createTailArgs(p)...)
+	return args
+}
+
+// baseHardeningArgs returns the create argv up to (but NOT including) the network
+// flag and the workdir/env/image tail: everything that is unconditional
+// hardening. Both createArgs (the sealed sandbox) and prefetchCreateArgs (the
+// networked prefetch container) build on this identical base, so the two can
+// never drift in their hardening; they differ ONLY in the network flag.
+func baseHardeningArgs(name string, p Profile) []string {
+	return []string{
 		"create",
 		"--name", name,
 		"--user", "1000:1000",
@@ -56,14 +67,41 @@ func createArgs(name string, p Profile) []string {
 		"--memory", p.Memory,
 		"--cpus", p.CPUs,
 	}
-	args = append(args, netMode...)
-	args = append(args,
+}
+
+// createTailArgs returns the workdir/env and the image + keep-alive command that
+// end every create argv.
+func createTailArgs(p Profile) []string {
+	return []string{
 		"-w", "/repo",
 		"-e", "HOME=/home/sandbox",
 		// The image and the keep-alive command are the tail of the argv.
 		p.Image,
 		"sleep", "infinity",
-	)
+	}
+}
+
+// prefetchCreateArgs builds the `docker create` argv for the PREFETCH container:
+// the identical unconditional hardening as the sealed sandbox (non-root, all caps
+// dropped, no-new-privileges, read-only root, tmpfs repo/home/tmp, pid/mem/cpu
+// caps) but WITH a default bridge network instead of --network none, because the
+// prefetch must reach the package registry.
+//
+// SAFETY: this is the ONE container meguard gives a network, and it is safe for
+// exactly one reason: it runs `npm install --ignore-scripts`, which executes NO
+// repo or dependency lifecycle script, so the untrusted repo code never runs and
+// therefore can never use the network. npm itself uses the network to fetch inert
+// package tarballs into the cache; those are executed later only inside the SEALED
+// sandbox (--network none / monitored), never here. The container has no host
+// mounts, so a malicious `file:`/`overrides`/etc. dependency spec resolves against
+// THIS container's filesystem, not the host's: the host-file-read class that a
+// host-side prefetch is prone to is structurally impossible here. Only the npm
+// cache is later copied out; node_modules is not.
+func prefetchCreateArgs(name string, p Profile) []string {
+	p = p.Normalize()
+	args := baseHardeningArgs(name, p)
+	args = append(args, "--network", "bridge")
+	args = append(args, createTailArgs(p)...)
 	return args
 }
 

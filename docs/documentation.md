@@ -14,13 +14,14 @@ closes, the threat model, and the scan analyzer architecture (implemented in
 
 - `main.go` - entry point. Builds a signal-aware context (SIGINT/SIGTERM) and
   hands it to the CLI so Ctrl-C cancels in-flight work.
-- `cmd/` - cobra wiring. `run` resolves the repo source, builds a Profile, runs
-  the static scan, drives the lifecycle, and prints a report; `scan` resolves
-  the repo and runs the same static scan alone, with no container. Both
-  default to a compact report and take `-v`/`--verbose` for the full one (see
-  "Output verbosity" below). This package DOES import `internal/analyze` (it
-  is where detection and containment are combined); see "Scan architecture"
-  below.
+- `cmd/` - cobra wiring. `run` resolves the repo source, builds a Profile,
+  runs the two-phase install for node (`cmd/prefetch.go`; see "Two-phase
+  install" below), runs the static scan, drives the lifecycle, and prints a
+  report; `scan` resolves the repo and runs the same static scan alone, with
+  no container. Both default to a compact report and take `-v`/`--verbose`
+  for the full one (see "Output verbosity" below). This package DOES import
+  `internal/analyze` (it is where detection and containment are combined);
+  see "Scan architecture" below.
 - `internal/sandbox/` - the sandbox engine: the `Runner` interface, the
   `DockerRunner` CLI implementation, the `Profile` type, the pure `createArgs`
   builder, the `Execute` orchestrator, and the optional `EgressInspector`
@@ -101,12 +102,20 @@ now; any other (Go, Rust, Ruby, and so on) is unrecognized and falls back to the
 node defaults, so it needs an explicit `--image`/`--cmd`. It is an ordered list
 of detectors; the first whose marker files exist at the repo root wins:
 
-| Detected | Markers (any) | Image | Install command |
+| Detected | Markers (any) | Image | Install command (single-phase / fast-fail fallback) |
 | --- | --- | --- | --- |
-| node | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` | `node:20-slim` | `npm install` |
-| python | `requirements.txt` | `python:3.12-slim` | `pip install --user -r requirements.txt` |
-| python | `pyproject.toml`, `setup.py`, `setup.cfg`, `Pipfile` | `python:3.12-slim` | `pip install --user .` |
+| node | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` | `node:20-slim` | `npm install --no-audit --no-fund --fetch-retries=0` |
+| python | `requirements.txt` | `python:3.12-slim` | `pip install --user --retries 0 --timeout 5 -r requirements.txt` |
+| python | `pyproject.toml`, `setup.py`, `setup.cfg`, `Pipfile` | `python:3.12-slim` | `pip install --user --retries 0 --timeout 5 .` |
 | python | any top-level `*.py` (no manifest) | `python:3.12-slim` | `python --version` (no-op) |
+
+`--fetch-retries=0` / `--retries 0 --timeout 5` are the fast-fail fix (see
+"Two-phase install" below): the sandbox network is always denied, so without
+them the install tool retried for minutes before giving up. `Ecosystem` also
+carries `PrefetchCmd` and `OfflineInstallCmd` (`internal/sandbox/detect.go`);
+node is the only ecosystem with a non-empty `PrefetchCmd` today, and when
+`cmd/run.go` uses it, `OfflineInstallCmd` replaces the table's InstallCmd as
+the sandbox command instead. See "Two-phase install" below.
 
 Precedence is encoded by detector order: node precedes python (a polyglot repo
 is treated as node, the dominant ecosystem among the untrusted take-home repos
@@ -173,6 +182,16 @@ meguard assigned (`removeDetached`, best-effort, on a detached context) before
 returning the error. `docker rm -f` on a name the daemon never actually created
 is a harmless no-op, so this is safe to run unconditionally on the failure path.
 
+`ExecuteOptions.InstallTimeout` (default `2m` from the CLI's `--timeout` flag,
+`0` disables) bounds ONLY the install exec, not create/start/copy. When it
+elapses, `Execute` cancels the install's exec context and returns
+`sandbox.ErrInstallTimeout`; cleanup still runs via the same deferred detached
+`Remove`, so a hung or hostile lifecycle script (which the two-phase offline
+install, below, deliberately lets run in-box) cannot stall meguard
+indefinitely or leave a container behind. The same `--timeout` value also
+bounds the containerized prefetch step (`internal/sandbox/prefetch.go`; see
+"Two-phase install" below).
+
 Before any of this, `run` performs a preflight: `DockerRunner.Preflight` runs
 `docker info` to confirm a Docker-compatible runtime is reachable. If it is not,
 `run` fails fast, before cloning or printing the pre-run notice, with an
@@ -188,6 +207,114 @@ The repo source is resolved in `cmd/run.go`:
   top of the `isGitURL` gate). `--depth 1` also avoids submodule recursion.
 - A local path is used in place (its contents are copied into the container, not
   bind mounted).
+
+`resolveRepo` also returns an `owned` bool: true for a git-clone temp dir meguard
+created and may freely mutate, false for the user's own local path used in
+place. The two-phase prefetch below copies the populated cache dir back into
+the staging dir once the containerized prefetch completes, so an unowned repo
+is staged into a fresh temp copy first (`stageForMutation` in
+`cmd/prefetch.go`) so meguard never writes into the user's working tree. A git
+clone is already an owned temp copy and is used as-is.
+
+### Two-phase install (node) and install timeout
+
+Motivation: an install that never completes both stalls meguard (the sandbox
+network is by design always denied, so a naive install retries DNS for
+minutes before failing) and, because it never completes, never runs
+dependency lifecycle scripts, so their egress is never observed either. Two
+fixes plus a redesign, all in `internal/sandbox/detect.go`,
+`internal/sandbox/prefetch.go`, `internal/sandbox/args.go`, and
+`cmd/prefetch.go`:
+
+**Fast-fail.** The node single-phase install command carries
+`--fetch-retries=0`; the python commands carry `--retries 0 --timeout 5`.
+Both make the always-denied sandbox network fail in seconds instead of
+minutes.
+
+**Install timeout.** `ExecuteOptions.InstallTimeout` (see "The lifecycle"
+above) and the matching timeout on the prefetch container's exec
+(`PrefetchOptions.Timeout` in `internal/sandbox/prefetch.go`) bound the
+in-sandbox install and the containerized prefetch respectively, both driven
+by the CLI's `--timeout` flag (default `2m`, `0` disables).
+`sandbox.ErrInstallTimeout` is returned on either timeout; cleanup still runs
+either way.
+
+**Two-phase install, node only, default on.** `Ecosystem.PrefetchCmd` and
+`Ecosystem.OfflineInstallCmd` (`internal/sandbox/detect.go`) implement it:
+
+1. CONTAINER prefetch (`DockerRunner.RunPrefetch` in
+   `internal/sandbox/prefetch.go`, invoked from `runPrefetch` in
+   `cmd/prefetch.go`): runs `npm install --ignore-scripts --no-audit --no-fund
+   --registry=https://registry.npmjs.org/ --cache <in-container path>` inside
+   its OWN hardened, throwaway container, never on the host. The container's
+   argv is built by `prefetchCreateArgs` (`internal/sandbox/args.go`), which
+   shares `baseHardeningArgs` with the sealed sandbox's `createArgs` - same
+   non-root user, dropped capabilities, `no-new-privileges`, read-only root,
+   tmpfs-only writable paths, and resource ceilings - and differs ONLY in the
+   network flag: `--network bridge` instead of `--network none`, because
+   prefetch has to reach the registry. This is the one container meguard
+   gives a network, and it is safe for two independent reasons: (a)
+   `--ignore-scripts` suppresses every lifecycle script of the root package
+   and every dependency, so no repo or dependency code ever runs, and
+   therefore that network is never reachable to untrusted code (npm itself
+   only fetches inert package tarballs into a cache, executed later only
+   inside the sealed sandbox); (b) the container has NO host bind mounts
+   (same as every meguard container; invariant 2), so a hostile local
+   dependency spec (`file:`, a bare path, `overrides`, a workspace glob, a
+   lockfile entry, ...) resolves against the CONTAINER's own filesystem, not
+   the host's - the host-arbitrary-file-read class is structurally
+   impossible here, not something meguard has to detect and block with
+   string matching. `RunPrefetch`'s lifecycle mirrors `Execute`'s: create
+   (hardened + bridge) -> start -> copy the repo in (`CopyInto`, the same
+   tar-through-exec mechanism as the sealed sandbox) -> exec the prefetch
+   command -> copy the cache out -> `rm -f` (always, via a deferred detached
+   `removeDetached`). Only the populated npm cache (and any generated
+   lockfile) is copied back out (`copyCacheOut`); `node_modules` is never
+   copied out. `copyCacheOut` streams a `tar` process run inside the
+   container (via `docker exec`) into `untarInto`, an in-process extractor
+   that validates every entry path stays within the destination - the SAME
+   reason `CopyInto` cannot use `docker cp` to copy the repo in: `/repo` is a
+   tmpfs mount, and `docker cp` cannot read from a tmpfs or volume mount, only
+   the container's layered rootfs. The cache lives at `sandbox.CacheDirName`
+   (`.meguard-cache`) inside the staged repo dir on the host once copied out,
+   so it travels into the SEALED sandbox with the normal tar-in copy
+   (`sandbox.ContainerCacheDir`, `/repo/.meguard-cache`) with no extra mount.
+2. SANDBOX install: `cmd/run.go` swaps `profile.InstallCmd` for
+   `eco.OfflineInstallCmd` (`npm install --offline --no-audit --no-fund
+   --cache /repo/.meguard-cache`). The network is still fully sealed (same
+   `--network none` / monitor-netns mechanism as any other run; nothing about
+   containment changes) but the full dependency tree is already on disk, so
+   every lifecycle script - root and every transitive dependency - actually
+   executes inside the box, where its egress is logged and dropped. This is
+   the point of the redesign: it is what lets meguard observe a transitive
+   dependency's `postinstall` phoning a non-registry host, which the
+   single-phase, network-less fallback never even attempts because dependency
+   scripts never run without the packages being present.
+
+`willPrefetch` in `cmd/run.go` gates the two-phase path: only when the
+ecosystem defines `PrefetchCmd` (node today), `--no-prefetch` was not passed,
+and the user did not set `--cmd` explicitly (an explicit `--cmd` always wins
+and disables prefetch). Prefetch is best-effort end to end
+(`prefetchOutcome`): a staging failure, a failed prefetch container (create,
+start, copy-in, the `npm install --ignore-scripts` exec itself, or
+copy-cache-out), or a timeout all fall back to the ecosystem's single-phase
+`InstallCmd` with a stated reason, never a hard failure of the run.
+`printCompactPrefetchLine` renders the outcome as the compact report's
+`prefetch` status line.
+
+A repo passed as a local path is staged into a fresh temp copy before
+prefetch runs (`stageForMutation` in `cmd/prefetch.go`; prefetch's populated
+cache is copied back into that staging dir), so meguard never writes into
+the user's working tree. A git clone is already an owned temp copy and is
+used as-is.
+
+**Python stays intentionally single-phase**: `pythonEcosystem` sets no
+`PrefetchCmd`. Unlike npm's `--ignore-scripts`, there is no pip fetch that
+provably runs no repo code: `pip download`/`pip wheel` execute a source
+distribution's `setup.py` to resolve metadata, which would be code execution
+outside the sealed sandbox. Python gets the fast-fail and timeout fixes
+above, but not offline two-phase completion; a contained Python prefetch is
+future work (see docs/decisions.md).
 
 ### Runtime selection (`--runtime`)
 
@@ -320,7 +447,12 @@ What meguard denies:
   denied by a fail-closed OUTPUT DROP seal AND each blocked attempt (including
   connections to hardcoded IPs) is logged and reported, so you can SEE what the
   repo tried to reach. With `--strict` egress is denied by absence
-  (`--network none`, no stack) with no logs.
+  (`--network none`, no stack) with no logs. For node, the default two-phase
+  install (see "Two-phase install" above) is what makes a TRANSITIVE
+  dependency's `postinstall` payload observable at all: it installs offline
+  inside the sealed sandbox so that script actually runs in-box, where its
+  egress is logged and dropped, instead of never running because a
+  network-less single-phase install never gets far enough to reach it.
 - Persistence and escalation: read-only root, tmpfs-only writes, dropped caps,
   no-new-privileges, non-root user, and force-removal on exit leave nothing
   behind and nothing to escalate through.
@@ -363,7 +495,13 @@ trees, or inert tool caches (`skipDirNames` in `walk.go`): `.git`,
 `node_modules`, `vendor`, `.next`, and the Python set `__pycache__`, `venv`,
 `.venv`, `env`, `.tox`, `.eggs`, `.mypy_cache`, `.pytest_cache`, plus glob-named
 packaging metadata dirs (`*.egg-info`/`*.dist-info`, via
-`isGeneratedMetadataDir`). The dependency trees CAN carry a malicious payload,
+`isGeneratedMetadataDir`), plus meguard's own two-phase prefetch cache
+(`.meguard-cache`, `sandbox.CacheDirName`, duplicated as a literal rather than
+imported so `internal/analyze` stays free of any dependency on
+`internal/sandbox`): when `run` prefetches (see "Two-phase install" above),
+that directory lives inside the staged repo the scan walks and holds npm's
+compressed package blobs, which are inert here and would otherwise only add
+noise and entropy false positives. The dependency trees CAN carry a malicious payload,
 but so can `node_modules`, which has always been skipped: this is a consistent,
 deliberate tradeoff, not a hole. Containment (the sandboxed run), not the
 advisory scan, is the safety net for whatever a dependency ships, and these

@@ -24,8 +24,54 @@ type Ecosystem struct {
 	// work under the locked-down box (non-root uid 1000, read-only root): for
 	// example pip is given --user so its writes land on the /home/sandbox tmpfs
 	// rather than the read-only system site-packages.
+	//
+	// This is the SINGLE-PHASE (online-attempt) form and the fallback whenever
+	// PrefetchCmd is empty or prefetch fails. Under the sandbox it has no network,
+	// so it fails fast (the ecosystem flags below force zero retries); the value
+	// is that the repo's ROOT lifecycle scripts still fire and any egress attempt
+	// is logged and dropped.
 	InstallCmd []string
+
+	// PrefetchCmd, when non-empty, downloads the dependency tree into a cache
+	// WITHOUT executing any repo or dependency lifecycle code (for node:
+	// `npm install --ignore-scripts`). It is the first leg of the two-phase
+	// install and runs inside a hardened, networked, no-host-mount PREFETCH
+	// CONTAINER (sandbox.RunPrefetch), never on the host, so an untrusted local
+	// dependency spec cannot reach host files. The populated cache is copied back
+	// out so the second leg installs fully OFFLINE inside the sealed sandbox,
+	// where dependency postinstall payloads fire and their (blocked, logged)
+	// egress is observed.
+	//
+	// SAFETY: PrefetchCmd must run NO repo lifecycle script (that is what keeps
+	// the networked prefetch container safe). Only ecosystems whose fetch has a
+	// provably no-code-execution mode get one; see the node vs python split in
+	// detectNode/detectPython. Empty means the ecosystem stays single-phase and
+	// only InstallCmd is used.
+	//
+	// The literal token CacheDirPlaceholder in PrefetchCmd is substituted for the
+	// in-container cache path (ContainerCacheDir) by the caller before execution.
+	PrefetchCmd []string
+
+	// OfflineInstallCmd is the sandbox install command used when PrefetchCmd ran
+	// successfully: it installs strictly from the prefetched cache with the
+	// network sealed, so a complete dependency tree (root AND transitive) is
+	// built and every lifecycle script executes inside the box. It is only
+	// consulted after a successful prefetch; otherwise InstallCmd is used.
+	OfflineInstallCmd []string
 }
+
+// Prefetch cache location. CacheDirName is a directory created under the staged
+// repo on the host by the prefetch step; because it lives inside the repo dir it
+// travels into the sandbox with the normal tar copy and lands at ContainerCacheDir
+// (/repo/<name>), where the offline install reads it. It is deliberately dot-
+// prefixed and repo-relative so it needs no extra mount and is cleaned up with the
+// staged repo. CacheDirPlaceholder is substituted for the absolute HOST cache path
+// inside PrefetchCmd before the prefetch runs.
+const (
+	CacheDirName        = ".meguard-cache"
+	ContainerCacheDir   = "/repo/" + CacheDirName
+	CacheDirPlaceholder = "__MEGUARD_CACHE_DIR__"
+)
 
 // detectors is the ordered list of ecosystem detectors. The first one to match
 // the repo root wins, so order encodes precedence. Node precedes Python: a
@@ -66,9 +112,36 @@ func detectNode(root string) (Ecosystem, bool) {
 	} {
 		if fileExists(filepath.Join(root, marker)) {
 			return Ecosystem{
-				Name:       "node",
-				Image:      DefaultImage,
-				InstallCmd: DefaultInstallCmd(),
+				Name:  "node",
+				Image: DefaultImage,
+				// Single-phase fallback: attempted online, but --fetch-retries=0
+				// makes the (always denied) network fail immediately instead of
+				// backing off for minutes. Root lifecycle scripts still fire.
+				InstallCmd: []string{"npm", "install", "--no-audit", "--no-fund", "--fetch-retries=0"},
+				// Two-phase leg 1 (PREFETCH CONTAINER): --ignore-scripts downloads
+				// and links the full dependency tree but runs NO lifecycle script of
+				// the root or any dependency, so no untrusted code runs. This command
+				// executes inside a hardened, networked, no-host-mount container (see
+				// sandbox.RunPrefetch / prefetchCreateArgs), NOT on the host, so a
+				// malicious local dependency spec (file:/overrides/...) resolves
+				// against the container's own filesystem and can never read a host
+				// file. --cache points at the in-container cache path (substituted
+				// from CacheDirPlaceholder), which is copied back out for leg 2.
+				// --registry pins the public registry for determinism (defense in
+				// depth against a repo .npmrc that redirects it; the fetched tarballs
+				// are inert here and only run later in the sealed sandbox regardless).
+				PrefetchCmd: []string{
+					"npm", "install",
+					"--ignore-scripts", "--no-audit", "--no-fund",
+					"--registry=https://registry.npmjs.org/",
+					"--cache", CacheDirPlaceholder,
+				},
+				// Two-phase leg 2 (SEALED SANDBOX): install strictly OFFLINE from the
+				// prefetched cache. The network is sealed, so --offline both
+				// guarantees no egress path is needed and fails fast if anything
+				// is missing. Every lifecycle script (root AND transitive deps)
+				// runs here, in the box, where its egress is logged and dropped.
+				OfflineInstallCmd: []string{"npm", "install", "--offline", "--no-audit", "--no-fund", "--cache", ContainerCacheDir},
 			}, true
 		}
 	}
@@ -91,7 +164,7 @@ func detectNode(root string) (Ecosystem, bool) {
 // automatically. The user runs the actual script explicitly with --cmd.
 func detectPython(root string) (Ecosystem, bool) {
 	if fileExists(filepath.Join(root, "requirements.txt")) {
-		return pythonEcosystem([]string{"pip", "install", "--user", "-r", "requirements.txt"}), true
+		return pythonEcosystem([]string{"pip", "install", "--user", "--retries", "0", "--timeout", "5", "-r", "requirements.txt"}), true
 	}
 	for _, marker := range []string{
 		"pyproject.toml",
@@ -100,7 +173,7 @@ func detectPython(root string) (Ecosystem, bool) {
 		"Pipfile",
 	} {
 		if fileExists(filepath.Join(root, marker)) {
-			return pythonEcosystem([]string{"pip", "install", "--user", "."}), true
+			return pythonEcosystem([]string{"pip", "install", "--user", "--retries", "0", "--timeout", "5", "."}), true
 		}
 	}
 	if hasTopLevelPyFile(root) {
@@ -132,7 +205,16 @@ func hasTopLevelPyFile(root string) bool {
 // pythonEcosystem builds a Python Ecosystem with the given install command.
 // --user (set by callers) sends installs to $HOME/.local on the /home/sandbox
 // tmpfs, which is writable under the read-only root; a plain `pip install` would
-// fail trying to write the read-only system site-packages.
+// fail trying to write the read-only system site-packages. The callers add
+// --retries 0 --timeout 5 so the (always denied) network fails fast rather than
+// retrying for minutes.
+//
+// Python is deliberately SINGLE-PHASE: it has no PrefetchCmd. Unlike npm's
+// --ignore-scripts, there is no host-side pip fetch that provably runs no repo
+// code: `pip download`/`pip wheel` execute a source distribution's setup.py to
+// resolve metadata, which would run untrusted code on the host and break
+// invariant 1. A contained Python prefetch is future work (see docs/decisions.md);
+// until then Python gets fast-fail + a bounded timeout but not offline completion.
 func pythonEcosystem(cmd []string) Ecosystem {
 	return Ecosystem{
 		Name:       "python",

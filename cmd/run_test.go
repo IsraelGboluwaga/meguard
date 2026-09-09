@@ -44,11 +44,14 @@ func TestResolveRepoLocalPath(t *testing.T) {
 	dir := t.TempDir()
 
 	t.Run("existing directory resolves to abs path with noop cleanup", func(t *testing.T) {
-		got, cleanup, err := resolveRepo(context.Background(), dir, io.Discard)
+		got, owned, cleanup, err := resolveRepo(context.Background(), dir, io.Discard)
 		if err != nil {
 			t.Fatalf("resolveRepo error: %v", err)
 		}
 		cleanup() // must be safe to call
+		if owned {
+			t.Errorf("owned = true for a local path used in place, want false")
+		}
 		want, _ := filepath.Abs(dir)
 		if got != want {
 			t.Errorf("dir = %q, want %q", got, want)
@@ -56,7 +59,7 @@ func TestResolveRepoLocalPath(t *testing.T) {
 	})
 
 	t.Run("missing path errors", func(t *testing.T) {
-		_, _, err := resolveRepo(context.Background(), filepath.Join(dir, "does-not-exist"), io.Discard)
+		_, _, _, err := resolveRepo(context.Background(), filepath.Join(dir, "does-not-exist"), io.Discard)
 		if err == nil {
 			t.Fatal("expected error for missing path")
 		}
@@ -67,7 +70,7 @@ func TestResolveRepoLocalPath(t *testing.T) {
 		if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, _, err := resolveRepo(context.Background(), file, io.Discard)
+		_, _, _, err := resolveRepo(context.Background(), file, io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "not a directory") {
 			t.Fatalf("error = %v, want it to mention 'not a directory'", err)
 		}
@@ -124,7 +127,7 @@ func TestPrintCompactReportChecklistAndFindings(t *testing.T) {
 			{Analyzer: "entropy", Severity: analyze.Medium, File: "src/components/ui/button.tsx", Line: 8, Message: "abnormally long line"},
 		},
 	}
-	printCompactReport(&buf, profile, result, true, report)
+	printCompactReport(&buf, profile, result, prefetchOutcome{Attempted: true, OK: true}, true, report)
 	out := buf.String()
 	for _, want := range []string{
 		"✓ sandbox",

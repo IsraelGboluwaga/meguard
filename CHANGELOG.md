@@ -10,6 +10,63 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ### Added
 
+- Two-phase install for `meguard run` (node only, on by default), plus
+  fast-fail and an install timeout for all ecosystems
+  (`internal/sandbox/detect.go`, `internal/sandbox/prefetch.go`,
+  `internal/sandbox/args.go`, `internal/sandbox/execute.go`,
+  `cmd/prefetch.go`, `cmd/run.go`). Motivation: a real run took 15 minutes
+  because `npm install` retried DNS for minutes against the (by-design)
+  denied sandbox network before failing, and because it never completed,
+  dependency lifecycle scripts never ran, so their egress was never
+  observed.
+  - Fast-fail: node's install commands now carry `--fetch-retries=0`;
+    python's carry `--retries 0 --timeout 5`. The always-denied network now
+    fails in seconds, not minutes.
+  - New `--timeout` flag on `run` (default `2m`, `0` disables) bounds both
+    the containerized prefetch and the in-sandbox install, via a new
+    `ExecuteOptions.InstallTimeout` / `PrefetchOptions.Timeout` and a new
+    `sandbox.ErrInstallTimeout`. Cleanup (`docker rm -f`) still runs on
+    timeout.
+  - Two-phase install (node only, default on): `run` now (1) prefetches the
+    full dependency tree inside its own hardened, throwaway, NETWORKED
+    container (`sandbox.RunPrefetch` / `prefetchCreateArgs`, never on the
+    host) with `npm install --ignore-scripts --no-audit --no-fund
+    --registry=https://registry.npmjs.org/ --cache <in-container path>`
+    (runs NO repo or dependency lifecycle script, so the untrusted repo code
+    never runs; invariant 1 unaffected), then (2) installs strictly OFFLINE
+    inside the sealed sandbox from that cache (`npm install --offline ...`),
+    so every lifecycle script - root and every transitive dependency -
+    actually runs in-box, where its egress is logged and dropped. This is
+    what lets meguard catch a transitive dependency phoning a non-registry
+    host, which a network-less single-phase install never even attempts.
+    The prefetch container shares its hardening (`baseHardeningArgs`) with
+    the sealed sandbox and differs only in the network flag (`--network
+    bridge` instead of `--network none`); with no host bind mounts, a
+    hostile local dependency spec resolves only against the container's own
+    filesystem, never the host's. Only the populated npm cache (and any
+    generated lockfile) is copied back out, via a tar stream through
+    `docker exec` (`copyCacheOut`/`untarInto`), because `/repo` is a tmpfs
+    and `docker cp` cannot read it; `node_modules` is never copied out. New
+    `Ecosystem.PrefetchCmd` and `Ecosystem.OfflineInstallCmd` fields; new
+    `sandbox.CacheDirName` (`.meguard-cache`) and
+    `sandbox.ContainerCacheDir`; new `sandbox.PrefetchOptions` and
+    `DockerRunner.RunPrefetch`.
+  - New `--no-prefetch` flag skips the containerized prefetch and restores
+    the single-phase install (sandbox has no network, so dependency scripts
+    do not run; only the repo's own root scripts do). An explicit `--cmd`
+    also disables prefetch. The compact report gained a new `prefetch`
+    status line.
+  - A repo passed as a local path is staged into a fresh temp copy before
+    prefetch (`stageForMutation` in `cmd/prefetch.go`), so meguard never
+    writes the prefetch cache into the user's working tree. Git clones are
+    already temp copies.
+  - Static scan's directory skip list gained `.meguard-cache`
+    (`internal/analyze/walk.go`): the prefetch cache lives inside the
+    staged repo the scan walks and holds inert compressed package blobs.
+  - New `TestPrefetchCreateArgsHardening` (`internal/sandbox/args_test.go`)
+    asserts the prefetch container keeps every unconditional hardening flag
+    the sealed sandbox has and differs only by using `--network bridge`
+    instead of `--network none`.
 - Progress spinner on the compact (non--verbose) `meguard run` and
   `meguard scan` paths (`cmd/spinner.go`). The slow, previously silent stages
   (the static scan, and the in-container install) now animate a single
@@ -18,6 +75,32 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   clean) and unused in `-v`/`--verbose` mode, which streams its own live
   output. Frames are plain ASCII; the run binary stays cgo-free (terminal
   detection uses `os.File.Stat`, no external dependency).
+
+### Security
+
+- Closed the host-arbitrary-file-read class in the node dependency prefetch
+  structurally instead of by string-matching (see decisions.md, decision
+  0021): the prefetch runs `npm install --ignore-scripts` inside its own
+  hardened, throwaway container with no host bind mounts
+  (`sandbox.RunPrefetch` / `prefetchCreateArgs`), never on the host. A
+  hostile local dependency spec in `package.json` (`file:`, a bare path,
+  `overrides`, a workspace glob, a lockfile entry, ...) can therefore only
+  ever resolve against the prefetch container's own filesystem, never the
+  host's, so no manifest/lockfile parsing or path allowlist is needed to
+  detect it. This supersedes an earlier host-side prefetch design (with
+  `.npmrc` stripping, a minimal environment, an npm-version gate, and
+  host-side local-dependency-spec parsing) that a security review found
+  could not reliably close this class by string-matching alone across
+  npm's open-ended set of local-spec forms; that host-side machinery has
+  been removed entirely in favor of the container.
+- Hardened the prefetch cache extraction against a host symlink-plant
+  (CWE-59): the cache is streamed out of the container as a tar over a
+  repo-influenced subtree and extracted on the host, so `untarInto`
+  (`internal/sandbox/prefetch.go`) now materializes only directories and
+  regular files, validates each entry name stays within the destination, and
+  SKIPS symlink entries entirely (an npm cache needs none), so a crafted
+  `.meguard-cache/x -> ~/.ssh/id_rsa` entry can never be recreated on the
+  host. Covered by `TestUntarIntoSkipsSymlinks`/`TestUntarIntoRejectsTraversal`.
 
 ### Changed
 

@@ -23,6 +23,17 @@ The container image used by `run` must provide `tar`, which meguard uses to
 stream the repo into the sandbox tmpfs. The defaults (node:20-slim) and other
 Debian/Alpine-based images include it.
 
+For a node repo, `run` also does a containerized dependency prefetch by
+default (the first leg of the two-phase install; see README.md and
+docs/documentation.md): a throwaway, hardened container with a network runs
+`npm install --ignore-scripts`. This needs the same container runtime already
+required above, plus outbound network access from that runtime to the public
+npm registry (`registry.npmjs.org`). No local `npm` is needed on the host at
+all; the prefetch runs entirely inside the container. If the runtime cannot
+reach the registry, prefetch fails and `run` automatically falls back to the
+single-phase install, so this is not a hard requirement, just something that
+changes what gets exercised. `--no-prefetch` skips it outright.
+
 ### To build meguard
 
 - Go 1.24 or newer.
@@ -144,17 +155,26 @@ release version is injected into the binary via ldflags and shown by
     meguard run https://github.com/octocat/Hello-World.git
 
 Expected for `run` (default, compact): a one-line header, then a status
-checklist (`sandbox`, `install`, `scan`, `egress`, `secrets`), a "Top
-findings" block if scan found anything High/Critical, and a single `RESULT:
-...` sentence. The raw install log is only shown if the install exited
-non-zero. Note that Hello-World has no package.json, so `npm install` reports
-a non-zero install exit code (and its log is printed); that is the sandboxed
-command's outcome, not a meguard failure. Point `run` at a repo with a
-package.json (or pass `--cmd`) to see a zero install exit code. Pass
-`-v`/`--verbose` for the full report: a pre-run notice listing the active
-protections, a STATIC SCAN section (skip scanning entirely with `--no-scan`),
-streamed sandbox output under a labeled section, and a result with the
-install exit code and the "0 host secrets exposed (by construction)" line.
+checklist (`sandbox`, `prefetch`, `install`, `scan`, `egress`, `secrets`), a
+"Top findings" block if scan found anything High/Critical, and a single
+`RESULT: ...` sentence. The raw install log is only shown if the install
+exited non-zero. Note that Hello-World has no package.json, so `npm install`
+reports a non-zero install exit code (and its log is printed); that is the
+sandboxed command's outcome, not a meguard failure. Point `run` at a repo
+with a package.json (or pass `--cmd`) to see a zero install exit code and,
+for a node repo, the `prefetch` line report a successful containerized fetch
+(or a stated fallback reason if it declined or failed). Pass `-v`/`--verbose`
+for the full report: a pre-run notice listing the active protections, a
+STATIC SCAN section (skip scanning entirely with `--no-scan`), streamed
+sandbox output under a labeled section, and a result with the install exit
+code and the "0 host secrets exposed (by construction)" line.
+
+`--no-prefetch` restores the single-phase node install (no containerized
+fetch; the sandbox has no network, so dependency lifecycle scripts do not
+run). `--timeout` (default `2m`, `0` disables) bounds both the containerized
+prefetch and the in-sandbox install; on install-side timeout the run reports
+`sandbox.ErrInstallTimeout`
+and cleanup still runs.
 
 Expected for `scan` (default, compact): a one-line header, a status line, and
 a "Top findings" block; `scan` exits non-zero only if any High/Critical
