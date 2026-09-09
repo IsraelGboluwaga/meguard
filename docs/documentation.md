@@ -3,10 +3,12 @@
 ## Overview
 
 meguard executes untrusted repositories inside a locked-down container sandbox,
-and statically scans them for signs of hidden malicious code. This document
-covers the architecture of the `run` path, each hardening flag and the door it
-closes, the threat model, and the scan analyzer architecture (implemented in
-`internal/analyze`).
+and statically scans them for signs of hidden malicious code. By default,
+after a successful install, `run` also EXECUTES the repo at runtime in the
+same sealed container, so a build-time or startup payload runs where it can
+be observed too. This document covers the architecture of the `run` path,
+each hardening flag and the door it closes, the threat model, and the scan
+analyzer architecture (implemented in `internal/analyze`).
 
 ## Architecture
 
@@ -16,7 +18,8 @@ closes, the threat model, and the scan analyzer architecture (implemented in
   hands it to the CLI so Ctrl-C cancels in-flight work.
 - `cmd/` - cobra wiring. `run` resolves the repo source, builds a Profile,
   runs the two-phase install for node (`cmd/prefetch.go`; see "Two-phase
-  install" below), runs the static scan, drives the lifecycle, and prints a
+  install" below), runs the static scan, builds the runtime execution plan
+  (see "Runtime execution phase" below), drives the lifecycle, and prints a
   report; `scan` resolves the repo and runs the same static scan alone, with
   no container. Both default to a compact report and take `-v`/`--verbose`
   for the full one (see "Output verbosity" below). This package DOES import
@@ -24,9 +27,10 @@ closes, the threat model, and the scan analyzer architecture (implemented in
   see "Scan architecture" below.
 - `internal/sandbox/` - the sandbox engine: the `Runner` interface, the
   `DockerRunner` CLI implementation, the `Profile` type, the pure `createArgs`
-  builder, the `Execute` orchestrator, and the optional `EgressInspector`
-  (`egress.go`: monitor argv, sinkhole script, and the pure `parseEgress`
-  parser). This package never imports analyze.
+  builder, the `Execute` orchestrator, the runtime execution planner
+  (`exec.go`: `DetectExecPlan`, `ExecStep`, `ExecOutcome`), and the optional
+  `EgressInspector` (`egress.go`: monitor argv, sinkhole script, and the pure
+  `parseEgress` parser). This package never imports analyze.
 - `internal/analyze/` - the scan engine: the `Analyzer` interface, the
   `Report`/`Finding` types, the `Scan` orchestrator (walk once, run every
   analyzer, correlate, dedupe, sort), and the manifest/entropy/regex analyzers
@@ -154,7 +158,16 @@ nothing else in the pipeline changes.
     docker start <id>
     docker exec -i <id> tar -xf - -C /repo   (repo streamed into the tmpfs)
     docker exec <id> <install cmd>           (stdout/stderr streamed live)
+    docker exec <id> <exec step 1>           (if install exited 0; see "Runtime execution phase")
+    docker exec <id> <exec step 2>           (...)
     docker rm -f <id>                        (always)
+
+The exec steps are the runtime execution phase (see "Runtime execution phase"
+below): they run in the SAME container as the install, after it, only when the
+install exited 0, in the same lifecycle position occupied by the install exec
+above. Egress is collected once, after the last exec step (or after the
+install if there are none), so a single report covers install, build, and run
+together.
 
 Copy mechanism: meguard does NOT use `docker cp`. Docker refuses `docker cp` into
 a --read-only container, so meguard builds a deterministic tar stream in-process
@@ -190,7 +203,10 @@ elapses, `Execute` cancels the install's exec context and returns
 install, below, deliberately lets run in-box) cannot stall meguard
 indefinitely or leave a container behind. The same `--timeout` value also
 bounds the containerized prefetch step (`internal/sandbox/prefetch.go`; see
-"Two-phase install" below).
+"Two-phase install" below) and, for the runtime execution phase (see below), a
+non-windowed exec step (a build, which is expected to exit on its own); a
+windowed step (a serve/start command) is bounded by its own `Window`
+(`--exec-window`) instead.
 
 Before any of this, `run` performs a preflight: `DockerRunner.Preflight` runs
 `docker info` to confirm a Docker-compatible runtime is reachable. If it is not,
@@ -315,6 +331,88 @@ distribution's `setup.py` to resolve metadata, which would be code execution
 outside the sealed sandbox. Python gets the fast-fail and timeout fixes
 above, but not offline two-phase completion; a contained Python prefetch is
 future work (see docs/decisions.md).
+
+### Runtime execution phase (default; `--no-exec` opts out)
+
+Motivation: install-only made `run` a glorified scan for a class of payload
+that only fires at build time or on app startup, not at dependency-install
+time (a component file, a `tailwind.config.ts`). An install-only run plus the
+egress monitor would report "0 egress attempts" for a genuinely malicious
+repo simply because nothing ever ran the payload.
+
+By default, and ONLY after the install succeeds (exit code 0), `Execute`
+(`internal/sandbox/execute.go`) now runs a list of `ExecStep`s inside the SAME
+sealed container, right after the install exec, before the egress read. When
+the install exits non-zero the steps are skipped entirely (`code == 0` gate in
+`Execute`): a broken install usually leaves the app unable to run, so running
+it anyway would only add noise, not signal.
+
+**Planning (host-side, read-only).** `DetectExecPlan`
+(`internal/sandbox/exec.go`) chooses the steps from the repo, exactly like
+`DetectEcosystem`:
+
+- **Node** (`nodeExecPlan`): reads `package.json` as data
+  (`encoding/json`). If a `build` script exists, `npm run build` runs first,
+  to completion. Then the first available long-running entry is served:
+  `npm start` (if a `start` script exists; npm special-cases the bare `start`
+  invocation), else `npm run dev`, else `npm run serve`, else `node <main>`
+  (the package's `main` field, if that file exists), else `node index.js` (if
+  it exists). No entry found means no serve step.
+- **Python** (`pythonExecPlan`): `main.py`, then `app.py`, then a single loose
+  top-level `*.py` file (`singleTopLevelPyFile`; zero or more than one is
+  ambiguous and yields no plan, mirroring the ecosystem-detection fallback).
+  No build step for Python.
+- Any other ecosystem, or an ecosystem with no recognized entry, yields `nil`
+  (no runtime phase).
+
+Reading `package.json` as data and checking file existence only, never
+executing anything, keeps this at the same read-only trust tier as
+`sandbox.DetectEcosystem`: invariant 1 holds. Choosing which command to run is
+not running it; the commands only ever run later, inside the already-sealed
+container, and detection only ever supplies commands to run in the box, never
+a security control, so invariant 3 holds too.
+
+**The observation window.** A dev server or long-running app never exits on
+its own, so a serve/start step carries a `Window` (`ExecStep.Window`, default
+`3s` via `--exec-window`): `runExecStep` bounds that step's exec context to
+`Window` and treats a Window-elapsed kill as SUCCESS (`ExecOutcome.Observed =
+true`), not a failure. A startup payload has already fired and been observed
+by the time the window elapses, and the deferred `Remove` force-kills the
+lingering process along with the container on every path, same as always. A
+non-windowed step (a build, which is expected to exit on its own) is instead
+bounded by `InstallTimeout`, exactly like the install command; exceeding it is
+recorded as `ExecOutcome.TimedOut`, not a hard failure of the run.
+
+**Overrides.** `--exec-cmd "<cmd>"` on `cmd/run.go` replaces the entire
+auto-detected plan with one explicit command, run under the observation
+window. `--no-exec` skips the phase entirely, restoring the install-only
+behavior. A parent-context cancel (Ctrl-C) between steps stops launching
+further steps and proceeds straight to cleanup.
+
+**Egress.** Egress is collected ONCE, after the LAST exec step (or after the
+install if there are no steps or the install failed), so `Result.Egress`
+covers install, build, and run together rather than only the install window.
+
+**Safety.** An `ExecStep` runs untrusted repo code exactly like the install
+command already does; it changes nothing about containment. The netns is
+still sealed fail-closed before the container exists, there are still no host
+mounts, `HOME` is still a scratch tmpfs, and the deferred `rm -f` still
+force-removes the container - and any process an `ExecStep` left running - on
+every path (success, a step timing out, a step never launching, panic, or
+Ctrl-C). This is dynamic analysis: it COMPLEMENTS the static scan (which
+already flags an obfuscated payload as text on disk before anything runs); it
+does not replace it. It is also necessarily partial, since it only observes
+what actually fires during the build and the fixed-length observation window,
+not every code path in the repo.
+
+**Reporting.** `Result.ExecOutcomes` (`internal/sandbox/execute.go`) records
+each step's label, command, exit code (or `-1` if it did not exit on its
+own), and whether it was `Observed` (window-stopped) or `TimedOut`. Both the
+compact and verbose reports gain an `exec` line/section
+(`printCompactExecLine`/`printExecResult` in `cmd/run.go`) stating what ran
+(for example "ran build (exit 0), start (observed then stopped)") or why the
+phase did not run (skipped via `--no-exec`, no runnable entry detected, or
+skipped because the install failed).
 
 ### Runtime selection (`--runtime`)
 
@@ -469,6 +567,16 @@ guarantee is independent of scan: scan is a read-only, host-side, advisory
 detector layered on top of containment, not a replacement for it. A bug in
 scan can never weaken the sandbox (`internal/sandbox` never imports
 `analyze`), and a scan failure never blocks the sandboxed run.
+
+The runtime execution phase (see "Runtime execution phase" above) is DYNAMIC
+analysis and, like scan, does not change or weaken the `run` guarantee: it
+runs untrusted code only inside the already-sealed container, using the same
+containment (no host mounts, egress denied fail-closed and logged, force-removal
+on every path) as the install step it follows. It complements the static
+scan rather than replacing it (a payload the scan already flagged as
+suspicious text may or may not fire during the build/observation window), and
+it is itself partial: it observes only what actually runs during the build
+and the fixed-length observation window, not every code path in the repo.
 
 ## Scan architecture (implemented; see `internal/analyze`)
 
@@ -645,7 +753,11 @@ checklist (`✓`/`!`/`✗` glyphs), only the High/Critical findings listed
 individually in a "Top findings" block (capped at `maxTopFindings` = 8, with
 everything else rolled into one "... N more" line grouped by analyzer, plus a
 "mostly `<dir>`/*" hint when one directory accounts for most of the rest), and
-a single free-text `RESULT: ...` sentence. `run` no longer echoes the invoked
+a single free-text `RESULT: ...` sentence. `run`'s checklist gained an `exec`
+line (`printCompactExecLine` in `cmd/run.go`) stating what the runtime
+execution phase ran (for example "ran build (exit 0), start (observed then
+stopped)") or why it did not run (`--no-exec`, no runnable entry detected, or
+the install failed so the phase was skipped). `run` no longer echoes the invoked
 `meguard run <source>` command as a header line (it is redundant with what the
 user typed); `scan`'s only header is the fixed `meguard scan (no container;
 read-only)` mode line. The raw install log (`run` only) is captured but not
@@ -667,8 +779,10 @@ its snippet under `STATIC SCAN`, and the streamed `SANDBOX OUTPUT` section
 (`run` only) followed by the full `RESULT` section.
 
 This is presentation only: detection, containment, exit codes,
-`--fail-on-scan`, and `--no-scan` behave identically in both modes. Compact
-rendering lives in `printCompactReport`/`printCompactEgressLine`/
+`--fail-on-scan`, and `--no-scan` behave identically in both modes; the same
+holds for `--no-exec`/`--exec-cmd`/`--exec-window`, which change only what
+runs, not how it is reported. Compact rendering lives in
+`printCompactReport`/`printCompactEgressLine`/`printCompactExecLine`/
 `summarizeCompactResult` (`cmd/run.go`) and `printCompactScanSection`/
 `printTopFindings`/`restHint` (`cmd/scan.go`); the pre-existing full-detail
 rendering (`printPreRunNotice`/`printScanSection`/`printResult`) is unchanged

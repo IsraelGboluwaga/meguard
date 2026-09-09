@@ -10,6 +10,51 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ### Added
 
+- Runtime execution phase for `meguard run`, on by default
+  (`internal/sandbox/exec.go`, `internal/sandbox/execute.go`, `cmd/run.go`).
+  Previously `run` was install-only, which missed a class of payload hidden
+  in app SOURCE (a component file, a `tailwind.config.ts`) that only
+  executes when the app builds or starts, not at dependency-install time; an
+  install-only run plus the egress monitor reported "0 egress attempts" even
+  for a genuinely malicious repo because nothing ever ran the payload. Now,
+  by default and only after a SUCCESSFUL install (exit code 0), `run`
+  EXECUTES the repo at runtime inside the SAME sealed container, so a
+  build-time or startup payload runs where the egress monitor observes and
+  drops its outbound attempts.
+  - Plan is auto-detected build-then-serve (`sandbox.DetectExecPlan`). Node:
+    `npm run build` (if a `build` script exists) to completion, then the
+    first of `npm start` / `npm run dev` / `npm run serve` / `node <main>` /
+    `node index.js`. Python: `main.py`, then `app.py`, then a single loose
+    top-level `*.py` file. Detection reads `package.json` as data and file
+    existence only, runs NO repo code on the host (same trust tier as
+    `sandbox.DetectEcosystem`; invariant 1 preserved). Unknown ecosystem or
+    no runnable entry means no runtime phase.
+  - A long-running server never exits on its own, so the serve step runs
+    under a short OBSERVATION WINDOW (default `3s`, new `--exec-window`
+    flag) and is then stopped; a startup payload has already fired by then,
+    and being stopped by the window is treated as success. A build step
+    (which exits on its own) is bounded by `--timeout`, like the install.
+  - New flags on `run`: `--no-exec` (skip the runtime phase; install-only,
+    the old behavior), `--exec-cmd "<cmd>"` (override the auto-detected plan
+    with one explicit command, run under the observation window), and
+    `--exec-window <duration>` (the observation window, default `3s`).
+  - If the install FAILS (non-zero exit), the runtime phase is SKIPPED: a
+    broken install usually cannot run the app.
+  - All five safety invariants are unchanged: runtime code still runs ONLY
+    inside the sealed container, no host mounts, egress still denied
+    fail-closed and logged, and the container (and any lingering server
+    process) is still force-removed on exit, panic, or Ctrl-C. This is
+    dynamic analysis that COMPLEMENTS the static scan (which already flags
+    an obfuscated payload as text on disk); it does not replace it, and it
+    is partial: it only observes what fires during the build and the
+    observation window.
+  - Egress is now collected ONCE after all runtime steps, so the report
+    covers install, build, and run together, instead of only the install
+    window.
+  - New `Result.ExecOutcomes`; both the compact and verbose reports gain an
+    `exec` line/section showing what ran (for example "ran build (exit 0),
+    start (observed then stopped)") or why it was skipped
+    (`printCompactExecLine`/`printExecResult` in `cmd/run.go`).
 - Two-phase install for `meguard run` (node only, on by default), plus
   fast-fail and an install timeout for all ecosystems
   (`internal/sandbox/detect.go`, `internal/sandbox/prefetch.go`,

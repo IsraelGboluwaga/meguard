@@ -36,7 +36,8 @@ This file is the working contract. Read it before making changes.
 
 Where they live in code:
 - Invariant 1: `cmd/run.go` `resolveRepo` (git clone only on host) and
-  `internal/sandbox` (all exec via `docker exec`).
+  `internal/sandbox` (all exec via `docker exec`, including the runtime
+  execution phase; `exec.go` `DetectExecPlan` only READS repo files on the host).
 - Invariant 2: `internal/sandbox/args.go` (tmpfs mounts, no bind mounts) and
   `docker.go` `CopyInto` (`docker cp`).
 - Invariant 3: `internal/sandbox/profile.go` (zero value is safest - including
@@ -47,7 +48,9 @@ Where they live in code:
 - Invariant 4: `internal/sandbox/args.go` `networkArgs` (`--network none` vs
   join the monitor netns) and `egress.go` `monitorScript` (fail-closed seal).
 - Invariant 5: `internal/sandbox/execute.go` (deferred detached-context Remove
-  for both containers) and `main.go` (signal.NotifyContext).
+  for both containers, registered before any install or runtime-exec step, so a
+  lingering windowed server is force-removed too) and `main.go`
+  (signal.NotifyContext).
 
 Scan lives in `internal/analyze` (analyzers) and `cmd/run.go`/`cmd/scan.go`
 (CLI wiring); see "Scan architecture" below. It is a read-only, host-side,
@@ -60,7 +63,9 @@ replacement for any of them.
     docker start <id>
     docker exec -i <id> tar -xf - -C /repo   (repo streamed in; see note below)
     docker exec <id> <install cmd>           (capture and stream stdout/stderr)
-    docker rm -f <id>                        (always)
+    docker exec <id> <exec step>             (0+ RUNTIME steps; only if install
+                                              exit 0; see "Runtime execution")
+    docker rm -f <id>                        (always; kills any lingering server)
 
 IMPLEMENTATION NOTE on invariant 2 (kept verbatim above): the mechanism is a
 tar stream through `docker exec`, NOT literal `docker cp`. End-to-end testing
@@ -98,6 +103,40 @@ existence (no repo code runs; invariant 1) and only ever supplies these two
 RELAX values, never a security control (invariant 3). `--memory` and `--cpus`
 are conservative defaults that will become user-configurable; a large install
 may need more than 2g.
+
+## Runtime execution (implemented; see `internal/sandbox/exec.go`)
+
+`meguard run` is a container that INSTALLS and then RUNS the repo, not just an
+installer. Install-only missed a whole class of payload: an infostealer hidden
+in APP SOURCE (a component file, a `tailwind.config.ts`) fires when the app
+BUILDS or STARTS, not at dependency-install time, so install-only plus the
+egress monitor reported "0 egress attempts" even for a genuinely malicious repo
+because nothing ever ran the payload (see docs/decisions.md).
+
+So, by DEFAULT and only after a SUCCESSFUL install (install exit code 0), `run`
+executes the repo at runtime INSIDE THE SAME sealed container, where the egress
+monitor observes and drops any outbound attempt. The plan is auto-detected
+build-then-serve by `sandbox.DetectExecPlan` (node: `npm run build` if present,
+then the first of `npm start` / `npm run dev` / `npm run serve` / `node <main>` /
+`node index.js`; python: `main.py`, then `app.py`, then a single loose top-level
+`*.py`). Detection reads package.json as DATA plus file existence only, runs NO
+repo code on the host (invariant 1, same tier as `DetectEcosystem`), and only
+ever supplies commands to run in-box, never a security control (invariant 3). A
+long-running server never exits, so a serve step runs under a short OBSERVATION
+WINDOW (`--exec-window`, default 3s) and is then stopped (a startup payload has
+fired by then); a build step, which exits, is bounded by `--timeout` like the
+install. A windowed step leaving a process running is fine: the deferred
+`docker rm -f` kills it with the container on every path (invariant 5). Egress
+is collected ONCE after the last step, so the report covers install + build +
+run together. Flags: `--no-exec` (install only, the old behavior), `--exec-cmd`
+(override the detected plan with one explicit command), `--exec-window`.
+
+This is DYNAMIC analysis that COMPLEMENTS the static scan (which already flags
+the obfuscated payload statically); it is partial by nature (it observes only
+what fires during the window) and never replaces the five invariants above. In
+the library layer (`sandbox.ExecuteOptions`), runtime steps are opt-in: an empty
+`ExecSteps` is install-only, so the zero value stays install-only and the "on by
+default" choice lives only in the CLI (like INSPECTED egress; invariant 3).
 
 ## Runtime requirement
 

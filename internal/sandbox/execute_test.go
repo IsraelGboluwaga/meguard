@@ -499,3 +499,154 @@ func TestExecuteInstallTimeoutZeroMeansNoTimeout(t *testing.T) {
 		t.Errorf("Remove called %d times, want 1", f.removeCalls)
 	}
 }
+
+// execScriptRunner is a Runner test double for the runtime-execution (ExecStep)
+// phase. Create/Start/CopyInto/Remove succeed immediately; Exec records every
+// command it is asked to run and delegates to onExec, which each test sets to
+// decide that command's exit code or to block until its context is cancelled
+// (simulating a never-exiting server stopped by its observation window).
+type execScriptRunner struct {
+	onExec      func(ctx context.Context, cmd []string) (int, error)
+	calls       [][]string
+	removeCalls int
+}
+
+func (e *execScriptRunner) Create(_ context.Context, _ sandbox.Profile) (string, error) {
+	return "exec-id", nil
+}
+func (e *execScriptRunner) CopyInto(_ context.Context, _, _, _ string) error { return nil }
+func (e *execScriptRunner) Start(_ context.Context, _ string) error          { return nil }
+func (e *execScriptRunner) Exec(ctx context.Context, _ string, cmd []string, _, _ io.Writer) (int, error) {
+	e.calls = append(e.calls, cmd)
+	return e.onExec(ctx, cmd)
+}
+func (e *execScriptRunner) Remove(_ context.Context, _ string) error {
+	e.removeCalls++
+	return nil
+}
+
+// TestExecuteRunsExecStepsAfterInstall covers the runtime-execution phase: after
+// a successful install, each ExecStep runs in order in the SAME container. A
+// non-windowed step that exits is reported by its exit code; a windowed step
+// that never exits is stopped when its observation window elapses and reported
+// as Observed (a success, not a failure).
+func TestExecuteRunsExecStepsAfterInstall(t *testing.T) {
+	r := &execScriptRunner{
+		onExec: func(ctx context.Context, cmd []string) (int, error) {
+			// The install command and the build step exit cleanly; the "start"
+			// step blocks like a real server until its window cancels the ctx.
+			if len(cmd) >= 2 && cmd[0] == "npm" && cmd[1] == "start" {
+				<-ctx.Done()
+				return -1, ctx.Err()
+			}
+			return 0, nil
+		},
+	}
+	o := opts()
+	o.InstallTimeout = 2 * time.Second
+	o.ExecSteps = []sandbox.ExecStep{
+		{Label: "build", Cmd: []string{"npm", "run", "build"}},
+		{Label: "start", Cmd: []string{"npm", "start"}, Window: 30 * time.Millisecond},
+	}
+
+	res, err := sandbox.Execute(context.Background(), r, o)
+	if err != nil {
+		t.Fatalf("Execute error = %v, want nil", err)
+	}
+	if len(res.ExecOutcomes) != 2 {
+		t.Fatalf("ExecOutcomes len = %d, want 2 (%+v)", len(res.ExecOutcomes), res.ExecOutcomes)
+	}
+	if b := res.ExecOutcomes[0]; b.Label != "build" || b.ExitCode != 0 || b.Observed || b.TimedOut {
+		t.Errorf("build outcome = %+v, want {build exit 0}", b)
+	}
+	if s := res.ExecOutcomes[1]; s.Label != "start" || !s.Observed {
+		t.Errorf("start outcome = %+v, want Observed=true (window stop)", s)
+	}
+	// Install + both exec steps ran, in order, in the one container.
+	if len(r.calls) != 3 {
+		t.Fatalf("Exec called %d times, want 3 (install + 2 steps)", len(r.calls))
+	}
+	if !reflect.DeepEqual(r.calls[1], []string{"npm", "run", "build"}) ||
+		!reflect.DeepEqual(r.calls[2], []string{"npm", "start"}) {
+		t.Errorf("exec step order wrong: %v", r.calls)
+	}
+	if r.removeCalls != 1 {
+		t.Errorf("Remove called %d times, want 1 (container force-removed once)", r.removeCalls)
+	}
+}
+
+// TestExecuteSkipsExecStepsOnInstallFailure asserts a failed install skips the
+// runtime phase entirely: a broken install cannot run the app, so no ExecStep is
+// executed and ExecOutcomes stays empty. Cleanup still runs.
+func TestExecuteSkipsExecStepsOnInstallFailure(t *testing.T) {
+	execRan := false
+	r := &execScriptRunner{
+		onExec: func(_ context.Context, cmd []string) (int, error) {
+			if len(cmd) >= 2 && cmd[1] == "run" { // the build step
+				execRan = true
+			}
+			// The install command itself exits non-zero.
+			if len(cmd) >= 2 && cmd[0] == "npm" && cmd[1] == "install" {
+				return 7, nil
+			}
+			return 0, nil
+		},
+	}
+	o := opts()
+	o.Profile = sandbox.Profile{InstallCmd: []string{"npm", "install"}}
+	o.ExecSteps = []sandbox.ExecStep{{Label: "build", Cmd: []string{"npm", "run", "build"}}}
+
+	res, err := sandbox.Execute(context.Background(), r, o)
+	if err != nil {
+		t.Fatalf("Execute error = %v, want nil", err)
+	}
+	if res.InstallExitCode != 7 {
+		t.Errorf("InstallExitCode = %d, want 7", res.InstallExitCode)
+	}
+	if len(res.ExecOutcomes) != 0 {
+		t.Errorf("ExecOutcomes = %+v, want none (install failed)", res.ExecOutcomes)
+	}
+	if execRan {
+		t.Error("build step ran despite a failed install; it must be skipped")
+	}
+}
+
+// TestExecuteCollectsEgressOnceAfterExecSteps asserts egress is read exactly
+// once, AFTER install and every exec step, so the report covers the whole
+// container life (install + build + run) in one capture.
+func TestExecuteCollectsEgressOnceAfterExecSteps(t *testing.T) {
+	r := &egressFakeRunner{
+		collectEvents: []sandbox.EgressEvent{{Proto: "dns", Dest: "evil.example"}},
+	}
+	o := opts()
+	o.Profile = sandbox.Profile{InspectEgress: true}
+	o.ExecSteps = []sandbox.ExecStep{
+		{Label: "build", Cmd: []string{"npm", "run", "build"}},
+		{Label: "start", Cmd: []string{"npm", "start"}, Window: 20 * time.Millisecond},
+	}
+
+	res, err := sandbox.Execute(context.Background(), r, o)
+	if err != nil {
+		t.Fatalf("Execute error = %v, want nil", err)
+	}
+	if !res.EgressInspected || len(res.Egress) != 1 {
+		t.Errorf("egress = %+v (inspected=%v), want 1 event", res.Egress, res.EgressInspected)
+	}
+	// collect must appear exactly once, and after the last exec.
+	lastExec, collectAt, collects := -1, -1, 0
+	for i, c := range r.calls {
+		switch c {
+		case "exec":
+			lastExec = i
+		case "collect":
+			collectAt = i
+			collects++
+		}
+	}
+	if collects != 1 {
+		t.Errorf("collect called %d times, want exactly 1 (calls: %v)", collects, r.calls)
+	}
+	if collectAt < lastExec {
+		t.Errorf("collect ran before the last exec (collect@%d, lastExec@%d): %v", collectAt, lastExec, r.calls)
+	}
+}

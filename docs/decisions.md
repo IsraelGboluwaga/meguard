@@ -593,3 +593,50 @@ here.
   New test: `TestCreateRemovesContainerOnFailure`
   (`internal/sandbox/docker_test.go`), a fake `docker` script that fails
   `create` and records that `rm -f meguard-...` is invoked next.
+
+## 0023 - Runtime execution phase for `meguard run` (default on)
+
+- Decision: after a SUCCESSFUL install (exit code 0), `run` now executes the
+  repo at runtime inside the SAME sealed container by default, so a payload
+  that only fires at build time or on app startup - not at
+  dependency-install time - runs where the egress monitor can observe and
+  drop its outbound attempts. The plan is auto-detected build-then-serve
+  (`sandbox.DetectExecPlan`: node runs a `build` script then the first of
+  `start`/`dev`/`serve`/`main`/`index.js`; python runs `main.py`, then
+  `app.py`, then a single loose top-level `*.py`). A long-running serve step
+  runs under a short OBSERVATION WINDOW (default `3s`, `--exec-window`) and
+  is then stopped, since a dev server or app never exits on its own; a build
+  step is bounded by `--timeout` instead, like the install. `--no-exec`
+  restores install-only; `--exec-cmd` overrides the plan with one explicit
+  command.
+- Alternatives: keep `run` install-only indefinitely (rejected: install-only
+  made `run` a glorified scan for this whole payload class - a build-time or
+  startup-triggered infostealer hidden in app source, for example a
+  component file or a `tailwind.config.ts`, never runs during a plain
+  `npm install`, so the egress monitor reports "0 egress attempts" even for
+  a genuinely malicious repo, and the static scan's flagged text is never
+  corroborated by an actual observed attempt); always run the serve step to
+  completion with no window (rejected: a dev server or long-running app
+  never exits on its own, so this would hang every run with a `start`
+  script indefinitely); run the exec phase even when the install failed
+  (rejected: a broken install usually leaves the app unable to run at all,
+  so running it anyway would only add noise, not signal); guess a
+  framework-specific runner such as Django's `manage.py runserver`
+  (rejected: that needs arguments and a bound port meguard cannot safely
+  infer; a project that must be launched a specific way is run explicitly
+  with `--exec-cmd`).
+- Reason: this is dynamic analysis that complements the static scan rather
+  than replacing it - the scan already flags an obfuscated payload as
+  suspicious text on disk, and the runtime phase corroborates whether it
+  actually fires, within the fixed-length build/observation window; it does
+  not claim to observe every code path, only what runs during that window.
+  It changes nothing about the five safety invariants: an `ExecStep` runs
+  untrusted code exactly like the install command already does, inside the
+  same already-sealed container, with the same no-host-mounts, fail-closed
+  egress, and force-removal-on-every-path guarantees; the install-success
+  gate (`code == 0`) and the observation window are the only new pieces of
+  logic, and a window-elapsed stop is treated as SUCCESS, not a failure,
+  since the payload has already had its chance to fire and be observed by
+  then. Egress is now collected once after the LAST runtime step (not just
+  after install), so a single report covers install, build, and run
+  together.

@@ -30,12 +30,24 @@ func newRunCmd() *cobra.Command {
 	var verbose bool
 	var noPrefetch bool
 	var installTimeout time.Duration
+	var noExec bool
+	var execCmd string
+	var execWindow time.Duration
 
 	cmd := &cobra.Command{
 		Use:   "run <repo-url-or-path>",
-		Short: "Clone or copy a repo into a locked-down sandbox and run its install command",
+		Short: "Clone or copy a repo into a locked-down sandbox, install, then run it",
 		Long: `run clones a git URL (or copies a local path) into a locked-down container
-sandbox and runs an install command inside it. Repo code never runs on the host.
+sandbox, installs it, then RUNS it inside the same sandbox. Repo code never runs
+on the host.
+
+After a successful install, run also EXECUTES the repo at runtime (auto-detected
+build then start/serve; see --exec-cmd) inside the sealed container, so a payload
+that only fires when the app builds or starts (not at dependency-install time)
+executes where the egress monitor can observe it. A long-running server is given
+a short observation window (--exec-window) and then stopped. Pass --no-exec to
+install only. This runtime phase is dynamic and partial: it observes what fires
+during the window, and complements (does not replace) the static scan.
 
 Before anything is executed, run also statically scans the repo's files on the
 host (manifest inspection, entropy/long-line detection, and pattern matching
@@ -67,6 +79,9 @@ unprivileged user rather than host root.`,
 				verbose:      verbose,
 				noPrefetch:   noPrefetch,
 				timeout:      installTimeout,
+				noExec:       noExec,
+				execCmd:      execCmd,
+				execWindow:   execWindow,
 			}, c.OutOrStdout(), c.ErrOrStderr())
 		},
 	}
@@ -110,6 +125,16 @@ unprivileged user rather than host root.`,
 	// box; bound it so a hung or spinning script cannot stall meguard. Applies to
 	// both the prefetch and the in-sandbox install. 0 disables the timeout.
 	cmd.Flags().DurationVar(&installTimeout, "timeout", 2*time.Minute, "max duration for the dependency prefetch and for the in-sandbox install command (0 disables)")
+	// After a successful install, meguard executes the repo at runtime inside the
+	// SAME sealed sandbox so a build-time or startup payload runs where the egress
+	// monitor sees it. --no-exec keeps the install-only behavior. --exec-cmd
+	// overrides the auto-detected build-then-serve plan with a single command.
+	cmd.Flags().BoolVar(&noExec, "no-exec", false, "skip the runtime execution phase; install only (do not build or start the repo)")
+	cmd.Flags().StringVar(&execCmd, "exec-cmd", "", "run this exact command inside the sandbox after install instead of the auto-detected build/start plan")
+	// A dev server or long-running app never exits on its own; run it under a
+	// short observation window (its startup payload has fired by then) and stop
+	// it. A build step, which exits, is bounded by --timeout instead.
+	cmd.Flags().DurationVar(&execWindow, "exec-window", 3*time.Second, "observation window for a long-running run/serve step before it is stopped")
 	return cmd
 }
 
@@ -127,6 +152,9 @@ type runOptions struct {
 	verbose      bool
 	noPrefetch   bool
 	timeout      time.Duration
+	noExec       bool
+	execCmd      string
+	execWindow   time.Duration
 }
 
 func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) error {
@@ -247,6 +275,24 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 		}
 	}
 
+	// Runtime execution phase (default on): after a SUCCESSFUL install, meguard
+	// runs the repo inside the SAME sealed sandbox so a payload that fires at
+	// build time or on startup (not at dependency-install time) executes where
+	// the egress monitor observes it. --no-exec skips it entirely; --exec-cmd
+	// overrides the auto-detected build-then-serve plan with one explicit command.
+	// Detection reads only file existence and package.json data (invariant 1;
+	// same tier as DetectEcosystem) and only ever supplies commands to run in the
+	// box, never a security control (invariant 3). repoDir here is the FINAL dir
+	// (a staged copy when prefetch ran), which carries the same manifests.
+	var execSteps []sandbox.ExecStep
+	if !o.noExec {
+		if fields := strings.Fields(o.execCmd); len(fields) > 0 {
+			execSteps = []sandbox.ExecStep{{Label: strings.Join(fields, " "), Cmd: fields, Window: o.execWindow}}
+		} else if ecoOK {
+			execSteps = sandbox.DetectExecPlan(repoDir, eco, o.execWindow)
+		}
+	}
+
 	// The raw install log is streamed live in --verbose mode (as before). In
 	// compact mode it is captured instead of streamed, and only shown if the
 	// install actually failed (exit != 0) or the run itself errors, since
@@ -263,7 +309,11 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 		instStdout, instStderr = &installLog, &installLog
 	}
 
-	sp.start(fmt.Sprintf("running %s in locked-down sandbox (%s)", strings.Join(profile.InstallCmd, " "), profile.Image))
+	runMsg := fmt.Sprintf("running %s in locked-down sandbox (%s)", strings.Join(profile.InstallCmd, " "), profile.Image)
+	if len(execSteps) > 0 {
+		runMsg = fmt.Sprintf("install then run (%s) in locked-down sandbox (%s)", execStepsSummary(execSteps), profile.Image)
+	}
+	sp.start(runMsg)
 	result, err := sandbox.Execute(ctx, runner, sandbox.ExecuteOptions{
 		RepoDir: repoDir,
 		Profile: profile,
@@ -276,6 +326,7 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 		// own stdio (Stdout/Stderr above) is ever buffered away.
 		Diag:           stderr,
 		InstallTimeout: o.timeout,
+		ExecSteps:      execSteps,
 	})
 	// Default (inspected) mode is experimental and needs a monitor image + NFLOG.
 	// If the monitor cannot start, fall back to the fully verified --network none
@@ -288,7 +339,7 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 		fmt.Fprintf(stderr, "meguard: egress inspection unavailable (%v)\n", err)
 		fmt.Fprintln(stderr, "meguard: falling back to --network none (egress still fully denied, but no egress logs). Fix the monitor image/runtime for logs, or pass --strict to require this mode.")
 		profile.InspectEgress = false
-		sp.start(fmt.Sprintf("running %s in locked-down sandbox (%s)", strings.Join(profile.InstallCmd, " "), profile.Image))
+		sp.start(runMsg)
 		result, err = sandbox.Execute(ctx, runner, sandbox.ExecuteOptions{
 			RepoDir:        repoDir,
 			Profile:        profile,
@@ -296,6 +347,7 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 			Stderr:         instStderr,
 			Diag:           stderr,
 			InstallTimeout: o.timeout,
+			ExecSteps:      execSteps,
 		})
 	}
 	sp.stop()
@@ -308,7 +360,7 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 	}
 
 	if o.verbose {
-		printResult(stdout, result, !o.noScan, scanReport)
+		printResult(stdout, result, execSteps, !o.noScan, scanReport)
 	} else {
 		if result.InstallExitCode != 0 && installLog.Len() > 0 {
 			fmt.Fprintln(stdout, sectionRule)
@@ -316,7 +368,7 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 			fmt.Fprintln(stdout, sectionRule)
 			stdout.Write(installLog.Bytes())
 		}
-		printCompactReport(stdout, profile, result, prefetch, !o.noScan, scanReport)
+		printCompactReport(stdout, profile, result, prefetch, execSteps, !o.noScan, scanReport)
 	}
 
 	if o.failOnScan {
@@ -414,11 +466,12 @@ func printPreRunNotice(w io.Writer, source, runtimeBin, ecosystem string, p sand
 	fmt.Fprintln(w, "  - ephemeral: the container is force-removed on exit, panic, or Ctrl-C")
 }
 
-func printResult(w io.Writer, r sandbox.Result, scanned bool, scanReport analyze.Report) {
+func printResult(w io.Writer, r sandbox.Result, execSteps []sandbox.ExecStep, scanned bool, scanReport analyze.Report) {
 	fmt.Fprintln(w, sectionRule)
 	fmt.Fprintln(w, "RESULT")
 	fmt.Fprintln(w, sectionRule)
 	fmt.Fprintf(w, "install exit code: %d\n", r.InstallExitCode)
+	printExecResult(w, execSteps, r)
 	if r.EgressInspected {
 		fmt.Fprintln(w, "0 host secrets exposed (by construction: no host mounts, scratch HOME; egress sealed fail-closed and logged)")
 	} else {
@@ -449,7 +502,7 @@ func printScanSummaryLine(w io.Writer, scanned bool, scanReport analyze.Report) 
 // printTopFindings in scan.go), and a single free-text RESULT line. It
 // intentionally omits the protections rationale and the raw install log
 // (printed separately, only on install failure) that --verbose keeps.
-func printCompactReport(w io.Writer, p sandbox.Profile, r sandbox.Result, prefetch prefetchOutcome, scanned bool, report analyze.Report) {
+func printCompactReport(w io.Writer, p sandbox.Profile, r sandbox.Result, prefetch prefetchOutcome, execSteps []sandbox.ExecStep, scanned bool, report analyze.Report) {
 	netDesc := "network denied (--strict, no logs)"
 	if p.InspectEgress {
 		netDesc = "network inspected (fail-closed)"
@@ -463,6 +516,8 @@ func printCompactReport(w io.Writer, p sandbox.Profile, r sandbox.Result, prefet
 		installGlyph = glyphBad
 	}
 	fmt.Fprintf(w, "%s install    %s (exit %d)\n", installGlyph, strings.Join(p.InstallCmd, " "), r.InstallExitCode)
+
+	printCompactExecLine(w, execSteps, r)
 
 	highCrit := 0
 	if scanned {
@@ -543,6 +598,79 @@ func printCompactEgressLine(w io.Writer, r sandbox.Result) {
 		fmt.Fprintf(w, "%s egress     0 attempts observed, 0 reached the network\n", glyphOK)
 	default:
 		fmt.Fprintf(w, "%s egress     %d blocked (%s), 0 reached the network\n", glyphOK, len(r.Egress), egressDestSummary(r.Egress))
+	}
+}
+
+// printCompactExecLine is the one-line runtime-execution summary for the status
+// checklist. It states whether the repo was actually run after install and what
+// each step did (a build that exited, a server observed then stopped), or why
+// the phase was skipped.
+func printCompactExecLine(w io.Writer, steps []sandbox.ExecStep, r sandbox.Result) {
+	switch {
+	case len(steps) == 0:
+		fmt.Fprintln(w, "- exec       skipped (--no-exec, or no runnable entry detected)")
+	case r.InstallExitCode != 0:
+		fmt.Fprintf(w, "- exec       skipped (install exited %d; app not run)\n", r.InstallExitCode)
+	case len(r.ExecOutcomes) == 0:
+		fmt.Fprintln(w, "- exec       not run")
+	default:
+		fmt.Fprintf(w, "%s exec       %s\n", glyphOK, execOutcomeSummary(r.ExecOutcomes))
+	}
+}
+
+// printExecResult renders the runtime-execution phase in the verbose RESULT
+// section, one line per step, mirroring printCompactExecLine's states.
+func printExecResult(w io.Writer, steps []sandbox.ExecStep, r sandbox.Result) {
+	switch {
+	case len(steps) == 0:
+		fmt.Fprintln(w, "runtime execution: skipped (--no-exec, or no runnable entry detected)")
+		return
+	case r.InstallExitCode != 0:
+		fmt.Fprintf(w, "runtime execution: skipped (install exited %d; app not run)\n", r.InstallExitCode)
+		return
+	case len(r.ExecOutcomes) == 0:
+		fmt.Fprintln(w, "runtime execution: not run")
+		return
+	}
+	fmt.Fprintln(w, "runtime execution (in the same sealed sandbox):")
+	for _, o := range r.ExecOutcomes {
+		fmt.Fprintf(w, "  - %s: %s [%s]\n", o.Label, execOutcomeState(o), strings.Join(o.Cmd, " "))
+	}
+}
+
+// execStepsSummary is a short comma-joined list of step labels for the spinner
+// message (for example "build, start").
+func execStepsSummary(steps []sandbox.ExecStep) string {
+	labels := make([]string, 0, len(steps))
+	for _, s := range steps {
+		labels = append(labels, s.Label)
+	}
+	return strings.Join(labels, ", ")
+}
+
+// execOutcomeSummary renders the runtime-execution outcomes as one line, e.g.
+// "ran build (exit 0), start (observed 3s, stopped)".
+func execOutcomeSummary(outs []sandbox.ExecOutcome) string {
+	parts := make([]string, 0, len(outs))
+	for _, o := range outs {
+		parts = append(parts, fmt.Sprintf("%s (%s)", o.Label, execOutcomeState(o)))
+	}
+	return "ran " + strings.Join(parts, ", ")
+}
+
+// execOutcomeState is the human phrase for a single step's terminal state. A
+// window-observed server and a clean exit are both successes; a timeout or a
+// step that never launched are noted plainly.
+func execOutcomeState(o sandbox.ExecOutcome) string {
+	switch {
+	case o.Observed:
+		return "observed then stopped"
+	case o.TimedOut:
+		return "timed out"
+	case o.ExitCode < 0:
+		return "did not run"
+	default:
+		return fmt.Sprintf("exit %d", o.ExitCode)
 	}
 }
 
