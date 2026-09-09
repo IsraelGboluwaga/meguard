@@ -74,7 +74,7 @@ unprivileged user rather than host root.`,
 	// The image and install command are the only two ecosystem-specific values.
 	// When left unset they are auto-detected from the repo's manifests (see
 	// sandbox.DetectEcosystem); an explicit flag always wins over detection.
-	cmd.Flags().StringVar(&image, "image", "", "container image (default: auto-detected from repo, else node:20-slim)")
+	cmd.Flags().StringVar(&image, "image", "", "container image (default: auto-detected from repo, else node:22-slim)")
 	cmd.Flags().StringVar(&installCmd, "cmd", "", `install command run inside the sandbox (default: auto-detected from repo, else "npm install")`)
 	// The runtime is the trust boundary. Empty means "docker"; any
 	// Docker-compatible CLI works (podman, nerdctl, ...). Rootless runtimes
@@ -217,11 +217,32 @@ func runSandbox(ctx context.Context, o runOptions, stdout, stderr io.Writer) err
 		} else {
 			defer stageCleanup()
 			repoDir = staged
+			// The prefetch's npm log is streamed live in --verbose mode (under a
+			// header, like the sandbox install), and in compact mode captured into
+			// a buffer that is discarded on success and flushed only if prefetch
+			// fails, since that is the one case where the log is the thing to debug.
+			// A clean prefetch's npm output (EBADENGINE warnings, deprecations, the
+			// package count) is noise. Cleanup diagnostics always go to the real
+			// stderr regardless, never into this buffer (see runPrefetch's diag).
+			var prefetchLog bytes.Buffer
+			prefetchOut := io.Writer(&prefetchLog)
+			if o.verbose {
+				fmt.Fprintln(stdout, sectionRule)
+				fmt.Fprintln(stdout, "PREFETCH OUTPUT")
+				fmt.Fprintln(stdout, sectionRule)
+				prefetchOut = stdout
+			}
 			sp.start("prefetching dependencies in a networked, no-host-mount container (no scripts run)")
-			prefetch = runPrefetch(ctx, runner, eco, repoDir, o.timeout, stderr)
+			prefetch = runPrefetch(ctx, runner, eco, repoDir, o.timeout, prefetchOut, stderr)
 			sp.stop()
 			if !prefetch.OK {
 				profile.InstallCmd = eco.InstallCmd
+				// Prefetch failed: its npm log is now the diagnostic the user needs,
+				// so flush the captured buffer (compact mode only; verbose already
+				// streamed it live).
+				if !o.verbose {
+					io.Copy(stderr, &prefetchLog)
+				}
 			}
 		}
 	}
