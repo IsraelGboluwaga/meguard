@@ -5,6 +5,17 @@ import (
 	"testing"
 )
 
+// TestDefaultImageIsSupportedNodeLTS pins the default image to a Node release
+// that is still in support. It exists so a future edit cannot silently revert
+// the default to an end-of-life base (Node 20 reached EOL, which was the reason
+// for the bump). Update it deliberately when the LTS baseline moves.
+func TestDefaultImageIsSupportedNodeLTS(t *testing.T) {
+	const want = "node:22-slim"
+	if DefaultImage != want {
+		t.Errorf("DefaultImage = %q, want %q (a supported Node LTS)", DefaultImage, want)
+	}
+}
+
 // TestProfileNormalize is a table-driven test of the zero-value-is-safe default
 // filling. It asserts that empty fields become the locked-down defaults and set
 // fields are preserved.

@@ -100,7 +100,7 @@ func DetectEcosystem(repoDir string) (Ecosystem, bool) {
 // detectNode recognizes a Node/npm repo from any of the standard manifest or
 // lockfiles. It reuses the package defaults so node detection can never drift
 // from DefaultImage / DefaultInstallCmd. yarn.lock or pnpm-lock.yaml still map
-// to `npm install` because node:20-slim ships only npm; running the install at
+// to `npm install` because node:22-slim ships only npm; running the install at
 // all is what exercises the repo's lifecycle scripts, which is the point.
 func detectNode(root string) (Ecosystem, bool) {
 	for _, marker := range []string{
