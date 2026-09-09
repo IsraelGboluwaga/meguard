@@ -418,3 +418,26 @@ here.
   `dist/`/`build/` stay walked (invariant unchanged): an attacker could disguise
   a payload as a build artifact, so only the entropy heuristic skips those.
   New tests: extended `TestWalkFilesSkipsNoiseDirs`, `TestIsGeneratedMetadataDir`.
+
+## 0021 - Force-remove the container if `docker create` itself fails
+
+- Decision: `DockerRunner.Create` (`internal/sandbox/docker.go`) now calls
+  `removeDetached(d, name, io.Discard)` before returning an error from a
+  failed `docker create` CLI invocation.
+- Alternatives: leave `Create` as-is and rely on the caller's cleanup
+  (rejected: `Execute` only defers its `Remove` once `Create` returns a
+  non-empty id, so a `docker create` that fails at the CLI level - for
+  example the context is cancelled right at that boundary, or a future
+  stdout-parse failure - after the daemon has already created the container
+  would leak it with no code path left to clean it up); only remove on
+  specific known-leaky error types (rejected: needlessly narrow; `docker rm
+  -f` on a name that was never actually created is a harmless no-op, so
+  removing unconditionally on any create failure is simpler and no less
+  safe).
+- Reason: closes a narrow gap in safety invariant 5 ("cleanup MUST run on
+  install failure, panic, or Ctrl-C, for both containers"): the container
+  meguard assigns its own name to before calling `docker create`, so cleanup
+  can target that name even when the CLI call itself never reports an id.
+  New test: `TestCreateRemovesContainerOnFailure`
+  (`internal/sandbox/docker_test.go`), a fake `docker` script that fails
+  `create` and records that `rm -f meguard-...` is invoked next.
