@@ -127,7 +127,7 @@ func TestPrintCompactReportChecklistAndFindings(t *testing.T) {
 			{Analyzer: "entropy", Severity: analyze.Medium, File: "src/components/ui/button.tsx", Line: 8, Message: "abnormally long line"},
 		},
 	}
-	printCompactReport(&buf, profile, result, prefetchOutcome{Attempted: true, OK: true}, true, report)
+	printCompactReport(&buf, profile, result, prefetchOutcome{Attempted: true, OK: true}, nil, true, report)
 	out := buf.String()
 	for _, want := range []string{
 		"✓ sandbox",
@@ -152,7 +152,7 @@ func TestPrintCompactReportChecklistAndFindings(t *testing.T) {
 
 func TestPrintResult(t *testing.T) {
 	var buf bytes.Buffer
-	printResult(&buf, sandbox.Result{InstallExitCode: 5}, true, analyze.Report{})
+	printResult(&buf, sandbox.Result{InstallExitCode: 5}, nil, true, analyze.Report{})
 	out := buf.String()
 	for _, want := range []string{
 		"install exit code: 5",
@@ -175,7 +175,7 @@ func TestPrintResultEgressBlocked(t *testing.T) {
 			{Proto: "tcp", Dest: "185.220.101.5:443"},
 			{Proto: "dns", Dest: "api.evil-c2.net"},
 		},
-	}, true, analyze.Report{})
+	}, nil, true, analyze.Report{})
 	out := buf.String()
 	for _, want := range []string{
 		"2 outbound attempt(s) BLOCKED",
@@ -192,7 +192,7 @@ func TestPrintResultEgressBlocked(t *testing.T) {
 // inspected". A clean result is a stated absence, never silent.
 func TestPrintResultEgressCleanIsExplicit(t *testing.T) {
 	var buf bytes.Buffer
-	printResult(&buf, sandbox.Result{EgressInspected: true, Egress: []sandbox.EgressEvent{}}, true, analyze.Report{})
+	printResult(&buf, sandbox.Result{EgressInspected: true, Egress: []sandbox.EgressEvent{}}, nil, true, analyze.Report{})
 	if out := buf.String(); !strings.Contains(out, "0 outbound attempts observed") {
 		t.Errorf("clean inspected run must state zero attempts explicitly\n  got:\n%s", out)
 	}
@@ -202,7 +202,7 @@ func TestPrintResultEgressCleanIsExplicit(t *testing.T) {
 // repo made zero calls.
 func TestPrintResultEgressUnreadable(t *testing.T) {
 	var buf bytes.Buffer
-	printResult(&buf, sandbox.Result{EgressInspected: true, EgressReadFailed: true, Egress: nil}, true, analyze.Report{})
+	printResult(&buf, sandbox.Result{EgressInspected: true, EgressReadFailed: true, Egress: nil}, nil, true, analyze.Report{})
 	out := buf.String()
 	if !strings.Contains(out, "could not be read") {
 		t.Errorf("unreadable monitor must be surfaced\n  got:\n%s", out)
@@ -217,7 +217,7 @@ func TestPrintResultEgressUnreadable(t *testing.T) {
 // live run surfaced.
 func TestPrintResultEgressCleanNilIsZeroNotUnreadable(t *testing.T) {
 	var buf bytes.Buffer
-	printResult(&buf, sandbox.Result{EgressInspected: true, EgressReadFailed: false, Egress: nil}, true, analyze.Report{})
+	printResult(&buf, sandbox.Result{EgressInspected: true, EgressReadFailed: false, Egress: nil}, nil, true, analyze.Report{})
 	out := buf.String()
 	if !strings.Contains(out, "0 outbound attempts observed") {
 		t.Errorf("a clean run with nil Egress must report zero attempts\n  got:\n%s", out)
@@ -243,5 +243,48 @@ func TestPrintPreRunNoticeInspectEgress(t *testing.T) {
 	// to the hardest no-network mode.
 	if !strings.Contains(out, "--strict") {
 		t.Errorf("inspected notice should mention --strict as the opt-out\n  got:\n%s", out)
+	}
+}
+
+// TestPrintCompactExecLine covers the runtime-execution checklist line across
+// its states: ran (build exited, server observed), skipped for --no-exec / no
+// entry, and skipped because the install failed.
+func TestPrintCompactExecLine(t *testing.T) {
+	tests := []struct {
+		name  string
+		steps []sandbox.ExecStep
+		res   sandbox.Result
+		want  string
+	}{
+		{
+			name:  "no steps",
+			steps: nil,
+			res:   sandbox.Result{InstallExitCode: 0},
+			want:  "- exec       skipped (--no-exec, or no runnable entry detected)",
+		},
+		{
+			name:  "install failed skips exec",
+			steps: []sandbox.ExecStep{{Label: "start"}},
+			res:   sandbox.Result{InstallExitCode: 1},
+			want:  "- exec       skipped (install exited 1; app not run)",
+		},
+		{
+			name:  "ran build then observed server",
+			steps: []sandbox.ExecStep{{Label: "build"}, {Label: "start"}},
+			res: sandbox.Result{InstallExitCode: 0, ExecOutcomes: []sandbox.ExecOutcome{
+				{Label: "build", ExitCode: 0},
+				{Label: "start", ExitCode: -1, Observed: true},
+			}},
+			want: "exec       ran build (exit 0), start (observed then stopped)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printCompactExecLine(&buf, tt.steps, tt.res)
+			if !strings.Contains(buf.String(), tt.want) {
+				t.Errorf("exec line = %q, want to contain %q", buf.String(), tt.want)
+			}
+		})
 	}
 }

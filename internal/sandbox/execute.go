@@ -38,6 +38,57 @@ type Result struct {
 	// only signal for "could not read", so zero attempts is never misreported as
 	// a read failure.
 	EgressReadFailed bool
+
+	// ExecOutcomes records what each ExecStep did, in order. Empty when no exec
+	// steps ran (none configured, or the install failed so the runtime phase was
+	// skipped). Egress observed during these steps is folded into Egress above,
+	// which is collected once after the LAST step.
+	ExecOutcomes []ExecOutcome
+}
+
+// ExecStep is one command run inside the sandbox AFTER a successful install, to
+// exercise the repo at RUNTIME so a payload that fires at build time or on app
+// startup (not at dependency-install time) executes inside the already-sealed
+// netns and its egress attempt is observed. Steps run in the order given, in the
+// same container as the install, so they see the installed dependency tree.
+//
+// SAFETY: an ExecStep runs untrusted repo code, exactly like the install command
+// already does. It changes nothing about containment: the netns is sealed
+// fail-closed before the container exists, there are no host mounts, HOME is a
+// scratch tmpfs, and the deferred rm -f still force-removes the container (and
+// any long-running process an ExecStep left behind) on every path.
+type ExecStep struct {
+	// Label is a short human name for the report ("build", "start").
+	Label string
+	// Cmd is the command to exec inside the container.
+	Cmd []string
+	// Window, when > 0, bounds this step to a short OBSERVATION WINDOW: the
+	// command is started and left to run until it exits on its own OR Window
+	// elapses, whichever comes first, and a Window-elapsed kill is treated as
+	// SUCCESS (not a failure). Use it for a long-running server that never exits
+	// on its own: a startup payload has already fired and been observed by the
+	// time the window elapses, and the deferred rm -f kills the lingering process
+	// with the container. Zero means run to completion, bounded by InstallTimeout,
+	// for a step that exits on its own (a build).
+	Window time.Duration
+}
+
+// ExecOutcome records what one ExecStep did, for the report. It is never a hard
+// error: a runtime phase that cannot complete must not abort the run or discard
+// the egress that WAS observed, so every terminal condition is captured here and
+// Execute continues to the egress read.
+type ExecOutcome struct {
+	Label string
+	Cmd   []string
+	// ExitCode is the command's exit code, or -1 if it did not exit on its own
+	// (window-stopped, timed out, cancelled, or failed to launch).
+	ExitCode int
+	// Observed is true when the step was stopped by its observation Window rather
+	// than exiting: the intended outcome for a long-running server, and a SUCCESS
+	// condition, not a failure.
+	Observed bool
+	// TimedOut is true when a non-windowed step (a build) exceeded InstallTimeout.
+	TimedOut bool
 }
 
 // ExecuteOptions configures a single Execute run.
@@ -71,6 +122,16 @@ type ExecuteOptions struct {
 	// (a real one now runs in-box under the two-phase offline install) from
 	// stalling meguard indefinitely.
 	InstallTimeout time.Duration
+
+	// ExecSteps are commands run inside the SAME sandbox after a SUCCESSFUL
+	// install (install exit code 0), to exercise the repo at runtime. They run in
+	// order; a step's non-zero exit or timeout does NOT abort later steps, and
+	// egress is collected once after the last one. Empty means install-only (the
+	// historical behavior). See ExecStep for the per-step observation-window
+	// semantics. When the install exits non-zero these steps are skipped: a failed
+	// install usually leaves the app unable to run, so running it would only add
+	// noise, not signal.
+	ExecSteps []ExecStep
 }
 
 // ErrInstallTimeout is returned by Execute when the install command exceeds
@@ -172,6 +233,25 @@ func Execute(ctx context.Context, r Runner, opts ExecuteOptions) (result Result,
 	}
 
 	result = Result{InstallExitCode: code}
+
+	// Runtime phase: after a SUCCESSFUL install, run each configured ExecStep in
+	// the SAME sealed container so a payload that fires at build time or on app
+	// startup (not at install time) executes inside the netns and its egress is
+	// observed. Skipped when the install failed (a broken install usually cannot
+	// run the app). Egress is collected ONCE after the last step, below, so it
+	// covers install + every exec step together.
+	if code == 0 {
+		for _, step := range opts.ExecSteps {
+			// A parent-ctx cancel (Ctrl-C) between steps: stop launching more and
+			// head straight to cleanup.
+			if ctx.Err() != nil {
+				break
+			}
+			result.ExecOutcomes = append(result.ExecOutcomes,
+				runExecStep(ctx, r, id, step, opts.InstallTimeout, opts.Stdout, opts.Stderr, opts.diag()))
+		}
+	}
+
 	if p.InspectEgress {
 		result.EgressInspected = true
 		// Give the monitor's tcpdump a moment to flush its last captured lines to
@@ -192,6 +272,56 @@ func Execute(ctx context.Context, r Runner, opts ExecuteOptions) (result Result,
 		}
 	}
 	return result, nil
+}
+
+// runExecStep runs one ExecStep inside the sandbox and reports what it did. It
+// NEVER returns an error: a runtime step that cannot complete (timed out,
+// window-stopped, cancelled, or failed to launch) must not abort the run or
+// discard the egress already observed, so every terminal condition is folded
+// into the returned ExecOutcome and any launch failure is noted on diag.
+//
+// A windowed step (Window > 0) is bounded by Window; a non-windowed step (a
+// build) is bounded by installTimeout, exactly like the install command.
+func runExecStep(ctx context.Context, r Runner, id string, step ExecStep, installTimeout time.Duration, stdout, stderr, diag io.Writer) ExecOutcome {
+	oc := ExecOutcome{Label: step.Label, Cmd: step.Cmd, ExitCode: -1}
+
+	bound := step.Window
+	if bound == 0 {
+		bound = installTimeout // a build is bounded like the install; 0 = unbounded
+	}
+	execCtx := ctx
+	if bound > 0 {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(ctx, bound)
+		defer cancel()
+	}
+
+	code, err := r.Exec(execCtx, id, step.Cmd, stdout, stderr)
+	if err == nil {
+		oc.ExitCode = code
+		return oc
+	}
+
+	// The step did not exit cleanly. A deadline hit with the parent ctx still
+	// live is one of our own bounds firing (not a Ctrl-C, which also cancels
+	// execCtx); classify it by whether the step was windowed.
+	deadline := errors.Is(execCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+	switch {
+	case step.Window > 0 && deadline:
+		// A long-running server we intentionally stopped after its observation
+		// window. Expected and successful: startup egress was already captured,
+		// and the deferred rm -f kills the process with the container.
+		oc.Observed = true
+	case deadline:
+		// A build (exit-expected step) exceeded InstallTimeout. Not fatal to the
+		// run: record it and let egress still be read.
+		oc.TimedOut = true
+	default:
+		// Parent ctx cancelled (Ctrl-C) or a real docker exec launch failure.
+		// Non-fatal by design: note it and continue so egress is still collected.
+		fmt.Fprintf(diag, "meguard: exec step %q did not complete: %v\n", step.Label, err)
+	}
+	return oc
 }
 
 // monitorFlushDelay is how long Execute waits after the install command exits

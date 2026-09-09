@@ -5,9 +5,11 @@ and statically scan them for signs of hidden malicious code.
 
 meguard is a fast, lightweight Go CLI for running repos you do not trust, for
 example fake-interview repos that hide infostealer or RAT payloads in
-`postinstall` hooks or obfuscated blobs. It clones or copies the repo into a
-hardened container and runs the install command there. Repo code never touches
-your host.
+`postinstall` hooks, obfuscated blobs, or app source that only runs when the
+app builds or starts. It clones or copies the repo into a hardened container,
+runs the install command there, and, by default, then executes the repo at
+runtime in the same sealed container so a build-time or startup payload also
+runs where it can be observed. Repo code never touches your host.
 
 meguard is a container AND a detector: `meguard run` combines the sandbox with
 a static scan of the repo's files (advisory by default), and `meguard scan`
@@ -76,7 +78,7 @@ variants, and verification.
 
 ## Usage
 
-    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"] [--runtime CLI] [--strict] [--no-scan] [--fail-on-scan] [--no-prefetch] [--timeout DURATION] [-v|--verbose]
+    meguard run <repo-url-or-path> [--image IMAGE] [--cmd "INSTALL CMD"] [--runtime CLI] [--strict] [--no-scan] [--fail-on-scan] [--no-prefetch] [--timeout DURATION] [--no-exec] [--exec-cmd "CMD"] [--exec-window DURATION] [-v|--verbose]
     meguard scan <repo-url-or-path> [-v|--verbose]
 
 `run` and `scan` both accept a git URL (cloned to a temp dir that is always
@@ -99,6 +101,12 @@ prefetch, then an offline in-sandbox install) so dependency lifecycle scripts
 run inside the box and their egress is observed; see
 [Two-phase install and install timeout](#two-phase-install-node-and-install-timeout)
 below.
+
+After a SUCCESSFUL install, `run` also EXECUTES the repo at runtime, by
+default, inside the SAME sealed container: install-only misses a payload
+hidden in app source (a component file, a build config) that only runs when
+the app builds or starts, not at dependency-install time. See
+[Runtime execution phase](#runtime-execution-phase-default-on) below.
 
 Examples:
 
@@ -132,12 +140,22 @@ Examples:
     # Shorten or disable the install/prefetch timeout (default 2m; 0 disables)
     meguard run ./suspicious-repo --timeout 30s
 
+    # Install only; skip the runtime execution phase (old behavior)
+    meguard run ./suspicious-repo --no-exec
+
+    # Override the auto-detected build/start plan with one explicit command
+    meguard run ./suspicious-repo --exec-cmd "npm run dev"
+
+    # Give a slow-starting server longer to fire its startup payload before
+    # it is stopped (default 3s)
+    meguard run ./suspicious-repo --exec-window 10s
+
     # Full detail: protections rationale, every finding, and the raw install log
     meguard run ./suspicious-repo -v
 
 By default `run` prints a COMPACT report: a per-stage status checklist
-(`sandbox`, `prefetch`, `install`, `scan`, `egress`, `secrets`, using ✓/!/✗
-glyphs), a "Top findings" block listing every High/Critical scan finding
+(`sandbox`, `prefetch`, `install`, `exec`, `scan`, `egress`, `secrets`, using
+✓/!/✗ glyphs), a "Top findings" block listing every High/Critical scan finding
 individually (capped at 8, with everything else rolled into one "... N more"
 line), and a single free-text `RESULT: ...` sentence. The raw install log is
 captured but not printed unless the install exited non-zero. The containerized
@@ -154,6 +172,7 @@ against a repo with a malicious `postinstall` hook on a transitive dependency:
     ✓ sandbox    node:22-slim, network denied (--strict, no logs), ephemeral
     ✓ prefetch   dependencies fetched in a no-host-mount container (no scripts run); deps install in-box
     ✓ install    npm install --offline --no-audit --no-fund --cache /repo/.meguard-cache (exit 0)
+    ✓ exec       ran build (exit 0), start (observed then stopped)
     ! scan       8 finding(s) (2 high, 6 medium) across 8 files
     ✓ egress     denied (--network none, no logs)
     ✓ secrets    0 exposed (by construction: no host mounts, scratch HOME)
@@ -279,6 +298,63 @@ distribution's `setup.py` to resolve metadata, which would be code execution
 outside the sealed sandbox. Python gets the fast-fail and timeout fixes
 above, but not offline two-phase completion. A contained Python prefetch is
 future work (see docs/decisions.md).
+
+### Runtime execution phase (default on)
+
+Install-only misses a whole class of payload: an infostealer hidden in app
+SOURCE (a component file, a `tailwind.config.ts`) that only executes when the
+app builds or starts, not at dependency-install time. Install-only plus the
+egress monitor would report "0 egress attempts" even for a genuinely
+malicious repo, because nothing ever ran the payload.
+
+By default, and only after the install SUCCEEDS (exit code 0), `run` now
+EXECUTES the repo at runtime inside the SAME sealed container, so a build-time
+or startup payload runs where the egress monitor can observe and drop its
+outbound attempts. If the install fails, the runtime phase is skipped: a
+broken install usually cannot run the app.
+
+The plan is auto-detected build-then-serve:
+
+- **Node**: runs `npm run build` (if a `build` script exists) to completion,
+  then the first available long-running entry: `npm start`, `npm run dev`,
+  `npm run serve`, `node <main>` (the package's `main` field), or
+  `node index.js`.
+- **Python**: runs `main.py`, then `app.py`, then a single loose top-level
+  `*.py` file (no build step for Python).
+- An unknown ecosystem, or a repo with no runnable entry recognized, gets no
+  runtime phase.
+
+Detection reads `package.json` as data and checks file existence only; it runs
+NO repo code on the host, the same read-only tier as ecosystem detection
+(invariant 1).
+
+A long-running server never exits on its own, so the serve step runs under a
+short OBSERVATION WINDOW (default `3s`, `--exec-window`) and is then stopped;
+a startup payload has already fired by the time the window elapses, and being
+stopped by the window is treated as success, not a failure. A build step
+(which exits on its own) is bounded by `--timeout` instead, like the install.
+
+Flags:
+
+- `--no-exec`: skip the runtime phase entirely; install only (the old
+  behavior).
+- `--exec-cmd "<cmd>"`: run this exact command instead of the auto-detected
+  plan, under the observation window.
+- `--exec-window <duration>` (default `3s`): the observation window for a
+  long-running serve step before it is stopped.
+
+All five safety invariants are unchanged: runtime code still runs ONLY inside
+the sealed container, with no host mounts, egress still denied fail-closed and
+logged, and the container (and any lingering server process) is still
+force-removed on exit, panic, or Ctrl-C. This is dynamic analysis that
+COMPLEMENTS the static scan (which already flags an obfuscated payload as text
+on disk); it does not replace it, and it is partial: it only observes what
+fires during the build and the observation window, not every code path.
+
+Egress is now collected ONCE after all runtime steps, so the report covers
+install, build, and run together. Both the compact and verbose reports gain an
+`exec` line stating what ran (for example "ran build (exit 0), start (observed
+then stopped)") or why the phase was skipped.
 
 ### Egress logging (default) and `--strict` (experimental default)
 
