@@ -71,7 +71,7 @@ func fakeGitBin(t *testing.T) (recordFile string) {
 	return recordFile
 }
 
-// TestResolveRepoCloneHardening is the regression guard for decision 0026: the
+// TestResolveRepoCloneHardening is the regression guard for decision 0027: the
 // host-side clone must lock git to safe transports so a crafted `ext::`/`file::`
 // URL cannot execute a command on the host. It asserts resolveRepo runs `git
 // clone` with GIT_ALLOW_PROTOCOL restricted to the four network transports and

@@ -188,6 +188,24 @@ detection alone, with no container and no Docker dependency at all.
     exfiltration (not just obfuscated payloads): a network call plus a
     secrets marker anywhere in one file, and a network call inside a
     build/lint/tooling config file that has no legitimate reason to make one.
+  - `autorun.go`: flags editor/dev-environment configs that execute a command
+    AUTOMATICALLY, before the developer asks - a VS Code `.vscode/tasks.json`
+    pinned to `runOn: folderOpen` (High), a dev-container lifecycle command
+    (`postCreateCommand` and friends, Low), and a committed git hook under
+    `.husky/`/`.githooks/` (Low). This is a distinct vector from a package.json
+    lifecycle script (`manifest.go`) or build/start-time app source (the
+    dynamic sandbox exec phase): it fires when the repo is OPENED IN AN EDITOR
+    or spun up as a dev container, on the HOST, outside any sandbox, so the
+    dynamic sandbox never observes it and the host-side static scan is the only
+    layer that can (a pre-open tripwire; hence the README's "scan before you
+    open" warning). It keys on the PLACEMENT (an auto-executing config that
+    runs any command), independent of whether the command matches a regex.go
+    pattern, so it catches a pipeless launcher (`curl -o p && node p`) that
+    `curl|sh` would miss; its findings use the `autorun` category so
+    `correlate` escalates them when a regex.go signal co-locates. Detection is
+    raw-content/regex, not JSON parsing, because these files are JSONC (an
+    attacker could shape a file VS Code tolerates but `encoding/json` refuses).
+    See decision 0026.
 - The AST analyzer (tree-sitter) needs cgo, isolated behind build tags so it
   is the sole cgo dependency and degrades to a labeled no-op when compiled
   out (`internal/analyze/ast.go`, `ast_cgo.go`, `ast_nocgo.go`):
@@ -297,7 +315,7 @@ Guard tests:
 - `TestSandboxDoesNotImportAnalyze` (architecture): PASSES now; FAILS if
   `internal/sandbox` gains any transitive dependency on analyze or an analyzer.
 - `TestResolveRepoCloneHardening` (clone transport contract): FAILS if the host
-  `git clone` drops `GIT_ALLOW_PROTOCOL`/`GIT_PROTOCOL_FROM_USER` (decision 0026).
+  `git clone` drops `GIT_ALLOW_PROTOCOL`/`GIT_PROTOCOL_FROM_USER` (decision 0027).
 - Integration (`-tags integration`): the rootfs really is read-only, egress
   really is denied under `--network none`, and `Remove` really deletes.
 

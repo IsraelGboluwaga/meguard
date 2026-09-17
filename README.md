@@ -17,6 +17,19 @@ Two commands:
 - `meguard scan <repo>` - run the same static scan alone, with no container and
   no Docker dependency.
 
+> [!WARNING]
+> **Scan a repo before you open it in an editor.** A repo can carry an
+> auto-run editor config (a VS Code `.vscode/tasks.json` pinned to
+> `folderOpen`, a dev-container lifecycle command, a committed git hook) that
+> executes a command *on your host, outside any sandbox, the instant you open
+> the folder* - this is how recent "fake interview" infostealers land. meguard
+> only clones and reads the repo; it never opens it in your editor, so it can
+> flag these launchers *before* they fire. But it can only do that if you run
+> `meguard scan <repo>` (or `meguard run <repo>`) **first**. Do not open an
+> untrusted repo in VS Code (or any editor/IDE, or `code .`) until meguard has
+> cleared it. If you already opened it, treat the host as potentially
+> compromised - meguard cannot undo a payload that already ran.
+
 ## Safety model
 
 meguard guarantees five invariants:
@@ -324,6 +337,15 @@ block), full detail under `-v`.
   exec, Windows LOLBins), exfiltration channels (Discord webhooks, Telegram bot
   API, raw-paste hosts), credential/wallet paths, persistence, recon, and bulk
   `process.env` dumps, plus co-occurrence checks for plain-text exfiltration.
+- **autorun**: editor and dev-environment configs that execute a command
+  *automatically*, before you ask - a VS Code `.vscode/tasks.json` pinned to
+  `runOn: folderOpen` (High), a dev-container lifecycle command
+  (`postCreateCommand` and friends), or a committed git hook (`.husky/`,
+  `.githooks/`). This keys on the *placement* (a config that runs on open/
+  create), so it catches a pipeless launcher like
+  `curl -o p && node p` that the regex analyzer's `curl | sh` pattern would
+  miss. These fire on your host outside any sandbox, so this is the signal the
+  "scan before you open" warning above depends on.
 
 **False-positive controls**: severity is capped by whether a file can execute
 (prose like `.md`/`.txt` is capped at Info); a correlation pass escalates two or
@@ -345,6 +367,12 @@ CI (`.github/workflows/ci.yml`) runs `gofmt -l`, `go build`, `go vet`,
 `go test ./...`, and a cgo-free check on the pure static build for every push
 and PR against `main`. Releases (`.github/workflows/release.yml`) run
 separately, triggered by pushing a `v*` tag.
+
+## License
+
+meguard is licensed under the [Apache License 2.0](LICENSE) - a permissive
+open-source license with an explicit patent grant. See the [LICENSE](LICENSE)
+file for the full text.
 
 ## More docs
 
