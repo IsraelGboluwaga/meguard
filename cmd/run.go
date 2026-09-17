@@ -429,12 +429,31 @@ func resolveRepo(ctx context.Context, source string, stderr io.Writer) (repoDir 
 		}
 		cleanup := func() { _ = os.RemoveAll(dir) }
 
-		// "--" terminates option parsing so a source beginning with "-" can
-		// never be smuggled in as a git flag (for example --upload-pack). The
-		// isGitURL gate already rejects such strings, but the terminator is
-		// unconditional defense in depth on the one command that touches an
-		// attacker-controlled string on the host.
+		// This is the ONE command that hands an attacker-controlled string to a
+		// tool on the host, so it is hardened three ways (invariant 1):
+		//
+		//  1. Protocol allowlist via GIT_ALLOW_PROTOCOL. git's "ext::" (and
+		//     "file::", "fd::", ...) are TRANSPORTS that execute a command as the
+		//     clone runs; e.g. `ext::sh -c '<payload>'` runs <payload> on the host
+		//     BEFORE any container exists. "--" does NOT stop this (a transport is
+		//     not a flag), and isGitURL's old ".git"-suffix rule would otherwise
+		//     admit `ext::sh -c '...' .git`. We refuse to lean on the ambient git
+		//     default (protocol.ext.allow varies by git build, version, and the
+		//     user's own gitconfig). GIT_ALLOW_PROTOCOL forces protocol.allow=never
+		//     and sets ONLY these four network transports to "always", OVERRIDING
+		//     any config (a plain "-c protocol.allow=never" would lose to a more
+		//     specific protocol.ext.allow=always in a user's gitconfig; the env var
+		//     does not). ext/file/other transports can never run a command here.
+		//  2. "--" terminates option parsing, so a source beginning with "-" can
+		//     never be smuggled in as a git flag (for example --upload-pack).
+		//  3. GIT_PROTOCOL_FROM_USER=0 marks this as a non-user-initiated clone,
+		//     so any transport whose policy is the default "user" is treated as
+		//     untrusted here too (belt-and-suspenders with the allowlist above).
 		gc := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--", source, dir)
+		gc.Env = append(os.Environ(),
+			"GIT_ALLOW_PROTOCOL=http:https:git:ssh",
+			"GIT_PROTOCOL_FROM_USER=0",
+		)
 		gc.Stdout = stderr
 		gc.Stderr = stderr
 		if err := gc.Run(); err != nil {
@@ -460,16 +479,30 @@ func resolveRepo(ctx context.Context, source string, stderr io.Writer) (repoDir 
 
 // isGitURL reports whether source should be treated as a git URL to clone
 // rather than a local path to copy.
+//
+// It admits ONLY the four network transports meguard supports, identified by an
+// explicit scheme (or the scp-like "git@host:path" form). A bare ".git" suffix
+// is NOT sufficient on its own: a string like `ext::sh -c '<payload>' .git`
+// ends in ".git" but names git's command-executing "ext" transport, so treating
+// any ".git"-suffixed string as a clone target would hand it to git and run the
+// payload on the host (invariant 1). Qualification is now by scheme ONLY; the
+// ".git" suffix plays no part. Anything without an accepted scheme falls through
+// to the local-path branch, where os.Stat rejects it. The clone itself pins a
+// protocol allowlist as well (see resolveRepo), so this is defense in depth, not
+// the sole guard.
 func isGitURL(source string) bool {
 	switch {
 	case strings.HasPrefix(source, "http://"),
 		strings.HasPrefix(source, "https://"),
 		strings.HasPrefix(source, "git://"),
-		strings.HasPrefix(source, "ssh://"),
-		strings.HasPrefix(source, "git@"):
+		strings.HasPrefix(source, "ssh://"):
 		return true
+	case strings.HasPrefix(source, "git@"):
+		// scp-like syntax: git@host:owner/repo(.git). Require the ":path"
+		// separator so a bare "git@..." string cannot slip through.
+		return strings.Contains(source, ":")
 	}
-	return strings.HasSuffix(source, ".git")
+	return false
 }
 
 func printPreRunNotice(w io.Writer, source, runtimeBin, ecosystem string, p sandbox.Profile) {

