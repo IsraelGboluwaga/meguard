@@ -8,6 +8,13 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ## [Unreleased]
 
+### Added
+
+- Apache License 2.0 (`LICENSE`), copyright Israel Arunah, plus a License
+  section in `README.md`. Permissive open-source license with an explicit
+  patent grant; fits the Go/container ecosystem (Docker, containerd, gVisor)
+  meguard's runner backends target.
+
 ### Changed
 
 - CI/release actions bumped past Node 20: `actions/checkout@v4` -> `@v5`,
