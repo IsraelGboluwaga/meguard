@@ -52,6 +52,61 @@ func TestIsGitURL(t *testing.T) {
 	}
 }
 
+// fakeGitBin writes an executable `git` stub to a temp dir, prepends that dir to
+// PATH for the duration of the test, and returns the path of a record file the
+// stub dumps its environment into. It lets a test observe exactly what env
+// resolveRepo hands `git clone` without a real remote or network.
+func fakeGitBin(t *testing.T) (recordFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	recordFile = filepath.Join(dir, "git-env.log")
+	// The stub must be named exactly "git" so it shadows the real git on PATH.
+	// It dumps its whole environment to recordFile and exits 0 so the clone is
+	// reported as successful (resolveRepo only checks the exit status).
+	script := "#!/bin/sh\nenv > " + recordFile + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return recordFile
+}
+
+// TestResolveRepoCloneHardening is the regression guard for decision 0026: the
+// host-side clone must lock git to safe transports so a crafted `ext::`/`file::`
+// URL cannot execute a command on the host. It asserts resolveRepo runs `git
+// clone` with GIT_ALLOW_PROTOCOL restricted to the four network transports and
+// GIT_PROTOCOL_FROM_USER=0. Without these, an attacker-controlled source is one
+// git default away from host code execution (invariant 1).
+func TestResolveRepoCloneHardening(t *testing.T) {
+	recordFile := fakeGitBin(t)
+
+	dir, owned, cleanup, err := resolveRepo(context.Background(), "https://example.com/foo/bar.git", io.Discard)
+	if err != nil {
+		t.Fatalf("resolveRepo error: %v", err)
+	}
+	defer cleanup()
+	if !owned {
+		t.Errorf("owned = false for a cloned repo, want true")
+	}
+	if dir == "" {
+		t.Fatal("resolveRepo returned an empty dir for a successful clone")
+	}
+
+	data, readErr := os.ReadFile(recordFile)
+	if readErr != nil {
+		t.Fatalf("fake git did not run (no env recorded): %v", readErr)
+	}
+	env := string(data)
+	for _, want := range []string{
+		"GIT_ALLOW_PROTOCOL=http:https:git:ssh",
+		"GIT_PROTOCOL_FROM_USER=0",
+	} {
+		if !strings.Contains(env, want) {
+			t.Errorf("clone env missing %q (transport hardening removed?)\n  got:\n%s", want, env)
+		}
+	}
+}
+
 func TestResolveRepoLocalPath(t *testing.T) {
 	dir := t.TempDir()
 

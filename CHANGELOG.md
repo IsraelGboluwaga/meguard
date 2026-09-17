@@ -8,6 +8,23 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ## [Unreleased]
 
+### Added
+
+- Integration test tier (`internal/sandbox/integration_test.go`, behind the
+  `integration` build tag) that spins REAL containers and asserts runtime
+  EFFECTS rather than argv: the rootfs is actually read-only, an outbound TCP
+  connect is actually denied under `--network none`, and `Remove` actually
+  deletes the container. Run with `go test -tags integration
+  ./internal/sandbox/` (requires a runtime; set `MEGUARD_IT_RUNTIME` to choose
+  one). Each test skips cleanly when no runtime is reachable, and the default
+  `go test ./...` is unchanged (no daemon or network needed). This converts the
+  sandbox's "verified intent" (argv/script contracts against fakes) into
+  "verified behavior".
+- Unit test `TestResolveRepoCloneHardening` (`cmd/run_test.go`): asserts the
+  host `git clone` runs with `GIT_ALLOW_PROTOCOL=http:https:git:ssh` and
+  `GIT_PROTOCOL_FROM_USER=0`, locking in the transport hardening from decision
+  0026 (the fix was previously covered only on the `isGitURL` side).
+
 ### Security
 
 - Harden the host-side `git clone` against git's command-executing transports

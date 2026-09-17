@@ -778,6 +778,39 @@ design: that is how detection and containment are combined in one command.
 What must stay independent is the sandbox's containment guarantee (a bug in
 scan must never be able to weaken it), not the CLI layer above it.
 
+### Tests: intent vs. enforcement
+
+The suite has two tiers, and it is worth knowing which guarantee a green run
+gives you:
+
+- Intent (default `go test ./...`, no runtime needed). Most sandbox tests drive
+  a test double -- `fakeRunner`/`egressFakeRunner` in
+  `internal/sandbox/execute_test.go`, and a fake `docker`/`git` binary
+  (`fakeDockerBin` in `docker_test.go`, `fakeGitBin` in `cmd/run_test.go`).
+  These verify what meguard ASKS the runtime to do: the exact `docker create`
+  argv (`TestCreateArgsHardening`), the fail-closed monitor SCRIPT
+  (`TestMonitorScriptFailClosed`), the lifecycle ordering and that `Remove` is
+  deferred and fires on panic/error/success (invariant 5), egress collected once
+  after the last step, and that the host `git clone` carries
+  `GIT_ALLOW_PROTOCOL`/`GIT_PROTOCOL_FROM_USER` (`TestResolveRepoCloneHardening`,
+  decision 0026). The `internal/analyze` tests are higher fidelity still: they
+  run the real analyzers over real files in `t.TempDir()`, so a pass there means
+  the detector genuinely works on those inputs. What the intent tier does NOT
+  prove is that the runtime HONORS the argv -- a flag that is silently ignored
+  by some runtime version would still pass.
+- Enforcement (`go test -tags integration ./internal/sandbox/`, a real runtime
+  required). `internal/sandbox/integration_test.go` spins actual containers and
+  asserts runtime EFFECTS, not argv: the rootfs is genuinely read-only
+  (`/etc` write fails, `/repo` tmpfs write succeeds), an outbound TCP connect is
+  genuinely denied under `--network none`, and `Remove` genuinely deletes the
+  container. It is behind the `integration` build tag so the default suite needs
+  no daemon or network, and each test skips cleanly when no runtime is reachable
+  (set `MEGUARD_IT_RUNTIME` to pick one, e.g. `podman`). Every container it
+  creates is force-removed on every path, including failure (invariant 5). This
+  tier is what converts "verified intent" into "verified behavior"; it is the
+  home for the live-host verification the inspected egress mode still needs (see
+  invariant 4 and CLAUDE.md).
+
 ### Output verbosity
 
 Both `run` and `scan` default to a COMPACT report: a per-stage status

@@ -275,16 +275,31 @@ detection alone, with no container and no Docker dependency at all.
     # Standard checks
     go build ./...
     go vet ./...
-    go test ./...
+    go test ./...        # intent tier: no runtime or network needed
+
+    # Enforcement tier: spins REAL containers, asserts runtime effects
+    # (read-only rootfs, egress denied, Remove deletes). Needs a runtime;
+    # skips cleanly when none is reachable. Set MEGUARD_IT_RUNTIME to choose.
+    go test -tags integration ./internal/sandbox/
 
     # Prove the run binary is cgo-free
     go version -m meguard | grep CGO_ENABLED   # expect CGO_ENABLED=0 on pure build
+
+Two test tiers (see docs/documentation.md "Tests: intent vs. enforcement"):
+the default suite verifies what meguard ASKS the runtime to do (argv/script
+contracts against fakes), the `integration`-tagged suite verifies the runtime
+HONORS it. A green default run is not proof the container actually contains;
+the integration tier is.
 
 Guard tests:
 - `TestCreateArgsHardening` (argv contract): FAILS if any hardening flag is
   removed from or altered in `createArgs`.
 - `TestSandboxDoesNotImportAnalyze` (architecture): PASSES now; FAILS if
   `internal/sandbox` gains any transitive dependency on analyze or an analyzer.
+- `TestResolveRepoCloneHardening` (clone transport contract): FAILS if the host
+  `git clone` drops `GIT_ALLOW_PROTOCOL`/`GIT_PROTOCOL_FROM_USER` (decision 0026).
+- Integration (`-tags integration`): the rootfs really is read-only, egress
+  really is denied under `--network none`, and `Remove` really deletes.
 
 ## Coding standards
 
