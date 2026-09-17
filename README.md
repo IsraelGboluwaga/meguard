@@ -365,6 +365,12 @@ CI (`.github/workflows/ci.yml`) runs `gofmt -l`, `go build`, `go vet`,
 and PR against `main`. Releases (`.github/workflows/release.yml`) run
 separately, triggered by pushing a `v*` tag.
 
+## License
+
+meguard is licensed under the [Apache License 2.0](LICENSE) - a permissive
+open-source license with an explicit patent grant. See the [LICENSE](LICENSE)
+file for the full text.
+
 ## More docs
 
 - [docs/documentation.md](docs/documentation.md) - architecture and threat model

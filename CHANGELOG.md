@@ -23,6 +23,10 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   Runs in both the pure-static and cgo builds. See decision 0026.
 - README now carries a prominent warning to scan a repo with meguard before
   opening it in any editor/IDE, and documents the new analyzer.
+- Apache License 2.0 (`LICENSE`), copyright Israel Arunah, plus a License
+  section in `README.md`. Permissive open-source license with an explicit
+  patent grant; fits the Go/container ecosystem (Docker, containerd, gVisor)
+  meguard's runner backends target.
 
 ### Changed
 
