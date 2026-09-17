@@ -18,17 +18,19 @@ Two commands:
   no Docker dependency.
 
 > [!WARNING]
-> **Scan a repo before you open it in an editor.** A repo can carry an
-> auto-run editor config (a VS Code `.vscode/tasks.json` pinned to
-> `folderOpen`, a dev-container lifecycle command, a committed git hook) that
-> executes a command *on your host, outside any sandbox, the instant you open
-> the folder* - this is how recent "fake interview" infostealers land. meguard
-> only clones and reads the repo; it never opens it in your editor, so it can
-> flag these launchers *before* they fire. But it can only do that if you run
-> `meguard scan <repo>` (or `meguard run <repo>`) **first**. Do not open an
-> untrusted repo in VS Code (or any editor/IDE, or `code .`) until meguard has
-> cleared it. If you already opened it, treat the host as potentially
-> compromised - meguard cannot undo a payload that already ran.
+> **Never open an untrusted repo in an editor until meguard has cleared it.** A
+> repo can carry an auto-run editor config - a VS Code `.vscode/tasks.json`
+> pinned to `folderOpen`, a dev-container lifecycle command, a committed git
+> hook - that runs a command *on your host, outside any sandbox, the instant you
+> open the folder*. This is how recent "fake interview" infostealers land.
+>
+> meguard only clones and reads a repo; it never opens it in your editor, so it
+> catches these launchers *before* they fire. Clear the repo first with `meguard
+> run <repo>` (the full sandbox-and-scan), or `meguard scan <repo>` for just the
+> fast, Docker-free host-side check - both run the same launcher detection. Until
+> then, no `code .` and no opening the folder in VS Code or any other editor/IDE.
+> If you already opened it, treat the host as potentially compromised: meguard
+> cannot undo a payload that already ran.
 
 ## Safety model
 
