@@ -217,10 +217,28 @@ and avoids showing protections for a run that cannot start.
 
 The repo source is resolved in `cmd/run.go`:
 - A git URL is `git clone --depth 1 -- <source>`ed to a temp dir that is always
-  removed. Cloning does not run install hooks, so it is safe on the host. The
-  `--` terminates git option parsing so an attacker-controlled source that
-  begins with `-` can never be smuggled in as a git flag (defense in depth on
-  top of the `isGitURL` gate). `--depth 1` also avoids submodule recursion.
+  removed. Cloning does not run install hooks, so it is safe on the host. This is
+  the one command that hands an attacker-controlled string to a host tool, so it
+  is hardened three ways (invariant 1):
+  - `GIT_ALLOW_PROTOCOL=http:https:git:ssh` forces `protocol.allow=never` and
+    re-enables only those four network transports, overriding any config. This
+    blocks git's command-executing transports (`ext::`, `file::`, `fd::`, ...); a
+    source like `ext::sh -c '<payload>'` would otherwise run `<payload>` on the
+    host during the clone, before any container exists. `--` does NOT stop this (a
+    transport is not a flag), and it cannot be relied on from the ambient git
+    default (`protocol.ext.allow` varies by git build/version and user gitconfig,
+    and an explicit per-transport `protocol.ext.allow=always` in a user's config
+    beats a plain `protocol.allow=never` -- only the env var overrides it).
+  - `GIT_PROTOCOL_FROM_USER=0` marks the clone non-user-initiated, so a transport
+    left at the default `user` policy is untrusted here too.
+  - `--` terminates git option parsing so an attacker-controlled source that
+    begins with `-` can never be smuggled in as a git flag.
+  These sit on top of the `isGitURL` gate, which now admits ONLY strings carrying
+  an accepted scheme (`http(s)://`, `git://`, `ssh://`, or scp-like `git@host:`).
+  A bare `.git` suffix is no longer sufficient on its own, so a crafted
+  `ext::sh -c '...' .git` falls through to the safe local-path branch (where
+  `os.Stat` rejects it) instead of reaching `git clone`. `--depth 1` also avoids
+  submodule recursion.
 - A local path is used in place (its contents are copied into the container, not
   bind mounted).
 
@@ -778,6 +796,39 @@ sandbox gains such a dependency.
 design: that is how detection and containment are combined in one command.
 What must stay independent is the sandbox's containment guarantee (a bug in
 scan must never be able to weaken it), not the CLI layer above it.
+
+### Tests: intent vs. enforcement
+
+The suite has two tiers, and it is worth knowing which guarantee a green run
+gives you:
+
+- Intent (default `go test ./...`, no runtime needed). Most sandbox tests drive
+  a test double -- `fakeRunner`/`egressFakeRunner` in
+  `internal/sandbox/execute_test.go`, and a fake `docker`/`git` binary
+  (`fakeDockerBin` in `docker_test.go`, `fakeGitBin` in `cmd/run_test.go`).
+  These verify what meguard ASKS the runtime to do: the exact `docker create`
+  argv (`TestCreateArgsHardening`), the fail-closed monitor SCRIPT
+  (`TestMonitorScriptFailClosed`), the lifecycle ordering and that `Remove` is
+  deferred and fires on panic/error/success (invariant 5), egress collected once
+  after the last step, and that the host `git clone` carries
+  `GIT_ALLOW_PROTOCOL`/`GIT_PROTOCOL_FROM_USER` (`TestResolveRepoCloneHardening`,
+  decision 0027). The `internal/analyze` tests are higher fidelity still: they
+  run the real analyzers over real files in `t.TempDir()`, so a pass there means
+  the detector genuinely works on those inputs. What the intent tier does NOT
+  prove is that the runtime HONORS the argv -- a flag that is silently ignored
+  by some runtime version would still pass.
+- Enforcement (`go test -tags integration ./internal/sandbox/`, a real runtime
+  required). `internal/sandbox/integration_test.go` spins actual containers and
+  asserts runtime EFFECTS, not argv: the rootfs is genuinely read-only
+  (`/etc` write fails, `/repo` tmpfs write succeeds), an outbound TCP connect is
+  genuinely denied under `--network none`, and `Remove` genuinely deletes the
+  container. It is behind the `integration` build tag so the default suite needs
+  no daemon or network, and each test skips cleanly when no runtime is reachable
+  (set `MEGUARD_IT_RUNTIME` to pick one, e.g. `podman`). Every container it
+  creates is force-removed on every path, including failure (invariant 5). This
+  tier is what converts "verified intent" into "verified behavior"; it is the
+  home for the live-host verification the inspected egress mode still needs (see
+  invariant 4 and CLAUDE.md).
 
 ### Output verbosity
 

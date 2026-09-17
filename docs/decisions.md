@@ -764,3 +764,51 @@ here.
   settings.json` auto-exec keys are also left for later: the high-signal, low-
   false-positive targets are folderOpen tasks, dev-container commands, and
   committed hooks.
+
+## 0027 - Lock the host clone to safe transports (ext:: RCE on the host)
+
+- Context: invariant 1 says repo code NEVER runs on the host and rests on "git
+  clone only, cloning runs no install hooks." That is true for hooks and (since
+  we never pass `--recurse-submodules`) for submodule command injection, but it
+  missed git's command-executing TRANSPORTS. `git clone 'ext::sh -c "<payload>"'`
+  runs `<payload>` on the host as the clone proceeds, before any container
+  exists. `file::` and `fd::` are the same family. The old `isGitURL` accepted
+  any string ending in `.git`, so `ext::sh -c '<payload>' .git` passed the gate,
+  and the `--` terminator does NOT stop it (a transport is a URL, not a flag).
+  Reproduced on the host: with the transport policy permitted, that URL shape
+  created a marker file via `git clone` alone. Whether it fired depended solely
+  on the ambient git `protocol.ext.allow` policy (varies by git build/version
+  and the user's own gitconfig), which meguard did not control -- exactly the
+  kind of implicit dependency invariant 3's philosophy rejects. On Apple Git
+  2.39.5 `ext` happened to be refused by default, so there was no LIVE exploit on
+  that host, but a Linux CI runner, a different git build, or a user gitconfig
+  with `protocol.ext.allow=always` reopens it. The realistic delivery is not a
+  human pasting an obvious `ext::sh` string (they'd likely notice) but any
+  non-interactive use -- a batch of URLs, CI, a wrapper reading a source from a
+  data field -- where no human eyeballs the string; a containment tool's bar is
+  "no input breaks containment," not "would a human notice."
+- Decision: two independent layers. (1) The clone runs with
+  `GIT_ALLOW_PROTOCOL=http:https:git:ssh` plus `GIT_PROTOCOL_FROM_USER=0`
+  (`resolveRepo` in `cmd/run.go`). `GIT_ALLOW_PROTOCOL` forces
+  `protocol.allow=never` and sets only those four network transports to
+  `always`, OVERRIDING any config. (2) `isGitURL` now admits only strings with an
+  accepted scheme (`http(s)://`, `git://`, `ssh://`, or scp-like `git@host:`
+  requiring the `:` separator); a bare `.git` suffix no longer qualifies, so a
+  crafted transport string falls through to the safe local-path branch where
+  `os.Stat` rejects it. `TestIsGitURL` gains the `ext::`/`file::`/`fd::` and bare
+  `repo.git` cases; the bare `repo.git` -> true expectation was removed (a
+  scheme-less `.git` string is now treated as a local path, which is correct --
+  `git clone repo.git` would treat it as a local path anyway).
+- Alternatives: rely on `-c protocol.allow=never` on the command line (REJECTED:
+  a more specific `protocol.ext.allow=always` in a user's gitconfig beats the
+  generic `protocol.allow`; only the `GIT_ALLOW_PROTOCOL` env var overrides
+  per-transport config). Tighten only `isGitURL` and not the clone, or only the
+  clone and not `isGitURL` (REJECTED: defense in depth -- either alone closes the
+  known string shape, but the two guard different layers, so both stay).
+  Enumerate and `-c ...allow=never` every dangerous transport (REJECTED: not
+  future-proof; an allowlist via `GIT_ALLOW_PROTOCOL` denies-by-default instead).
+- Reason: invariant 1 must hold for ANY attacker-controlled source, not just the
+  ones that visibly look malicious, and must not depend on the ambient git
+  protocol policy. Denies by default (only four transports allowed), overrides
+  hostile config, and states the guarantee in code, tests, and docs rather than
+  leaning on a git default that varies by host.

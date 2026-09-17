@@ -35,7 +35,10 @@ Two commands:
 meguard guarantees five invariants:
 
 1. **No host execution.** meguard only `git clone`s (cloning runs no install
-   hooks); everything else runs inside the container.
+   hooks); everything else runs inside the container. The clone is locked to the
+   `http(s)`/`git`/`ssh` transports (`GIT_ALLOW_PROTOCOL`), so a crafted URL
+   naming git's command-executing `ext::`/`file::` transports cannot run code on
+   the host during the clone.
 2. **No host mounts.** The repo is copied into a container tmpfs (streamed in as
    a tar through `docker exec`, since Docker refuses `docker cp` into a
    read-only container). The container has no route to host secrets.
