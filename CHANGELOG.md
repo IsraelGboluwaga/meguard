@@ -10,6 +10,19 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ### Added
 
+- New `autorun` static analyzer (`internal/analyze/autorun.go`) that flags
+  editor and dev-environment configs which execute a command automatically,
+  before you ask: a VS Code `.vscode/tasks.json` pinned to `runOn: folderOpen`
+  (High), a dev-container lifecycle command such as `postCreateCommand` (Low),
+  and a committed git hook under `.husky/` or `.githooks/` (Low). These fire on
+  your host, outside any sandbox, the instant you open the repo in an editor or
+  spin up a dev container - the "fake interview" infostealer vector - so the
+  static scan is the only layer that can catch them, and only if you run it
+  before opening the repo. It keys on placement, so it catches a pipeless
+  launcher (`curl -o p && node p`) that the `curl | sh` regex pattern misses.
+  Runs in both the pure-static and cgo builds. See decision 0026.
+- README now carries a prominent warning to scan a repo with meguard before
+  opening it in any editor/IDE, and documents the new analyzer.
 - Apache License 2.0 (`LICENSE`), copyright Israel Arunah, plus a License
   section in `README.md`. Permissive open-source license with an explicit
   patent grant; fits the Go/container ecosystem (Docker, containerd, gVisor)

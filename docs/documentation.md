@@ -664,6 +664,25 @@ usable report when these are present).
   plain-text exfiltration (not just obfuscated payloads): a network call plus
   a secrets marker anywhere in one file, and a network call inside a
   build/lint/tooling config file that has no legitimate reason to make one.
+- `autorun.go`: flags editor/dev-environment configs that execute a command
+  AUTOMATICALLY, before the developer asks - a VS Code `.vscode/tasks.json`
+  pinned to `runOn: folderOpen` (High), a dev-container lifecycle command
+  (`onCreateCommand`, `updateContentCommand`, `postCreateCommand`,
+  `postStartCommand`, `postAttachCommand`, `initializeCommand`; Low), and a
+  committed git hook under `.husky/` or `.githooks/` (Low, excluding husky's
+  `_` bootstrap dir and comment/blank-only hooks). This vector fires when the
+  repo is opened in an editor or spun up as a dev container - on the host,
+  outside any sandbox - so the dynamic `run` sandbox (which does `npm install`
+  + build/serve, never a VS Code folderOpen) cannot observe it; the host-side
+  static scan is the only layer that can, and only before you open the repo,
+  which is why the README warns you to scan first. It keys on the placement (an
+  auto-executing config that runs any command), independent of pattern match,
+  so it catches a pipeless launcher such as `curl -o p && node p` that
+  `regex.go`'s `curl | sh` pattern would miss. Findings use the `autorun`
+  category so the correlate pass escalates them when a `regex.go` signal lands
+  in the same file. Detection is raw-content/regex rather than JSON parsing,
+  because these files are JSONC and an attacker could shape one VS Code
+  tolerates but strict `encoding/json` rejects. See decision 0026.
 
 ### The AST analyzer: a labeled no-op behind cgo build tags
 

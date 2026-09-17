@@ -710,3 +710,57 @@ here.
   nothing about detection, containment, or the five invariants changes; a
   compact run should surface the single log that explains the failure, not
   stack a foregone downstream error on top of the real cause.
+
+## 0026 - Autorun analyzer: flag editor/dev-env configs that execute on open
+
+- Decision: add a pure-Go `autorun` analyzer (`internal/analyze/autorun.go`,
+  registered in `analyzers()`) that flags configuration files which execute a
+  shell command AUTOMATICALLY, before the developer asks: a VS Code
+  `.vscode/tasks.json` pinned to `runOn: folderOpen` (High), a dev-container
+  lifecycle command (`onCreateCommand`/`postCreateCommand`/`postStartCommand`/
+  `postAttachCommand`/`updateContentCommand`/`initializeCommand`, Low), and a
+  committed git hook under `.husky/` or `.githooks/` (Low). Prompted by the
+  "fake interview" campaign (an `Alona Cherednichenko`/blockchain lure) that
+  hid its launcher in `.vscode/tasks.json` with `folderOpen`, firing the
+  moment the victim opened the repo in VS Code -
+  https://ayorcodes.substack.com/p/i-almost-got-hacked-while-trying .
+- Why this is a distinct vector: it is neither a package.json lifecycle script
+  (already covered by manifest.go) nor app source that runs at build/start
+  (covered by the dynamic sandbox's exec phase, decision 0024). It fires when
+  the repo is OPENED IN AN EDITOR or spun up as a dev container, on the HOST,
+  outside any sandbox. The dynamic sandbox therefore cannot observe it: `run`
+  executes `npm install` + build/serve, never simulates a VS Code folderOpen,
+  so a folderOpen payload never fires in the box and the egress monitor
+  honestly reports zero attempts. The only layer that can catch it is the
+  host-side static scan, which reads the repo read-only (invariant 1) BEFORE
+  the developer opens it. This makes `scan`/`run` a pre-open tripwire and is
+  why the README now warns: scan before you open the repo in an editor.
+- Why LOCATION, not content, is the signal: the per-line regex set (regex.go)
+  already scans these files like any other text file, so a literal `curl | sh`
+  inside a tasks.json is caught there. What regex.go cannot see is the pipeless
+  launcher - `curl -o p && node p`, or a bare `node stage2.js` that pulls a
+  remote payload - which is an unremarkable string but sinister BECAUSE OF
+  WHERE IT SITS. So the autorun analyzer keys on the placement (an
+  auto-executing config that runs any command), independent of pattern match.
+  Its findings use the `autorun` category so the existing correlate pass
+  escalates them further when a regex.go signal co-locates in the same file.
+- Detection is raw-content/regex, not JSON parsing: tasks.json and
+  devcontainer.json are JSONC (comments, trailing commas) which strict
+  encoding/json rejects, and an attacker can deliberately shape a file VS Code
+  tolerates but the parser refuses. Matching `"runOn": "folderOpen"` and the
+  command keys on raw bytes cannot be evaded that way.
+- Severity split: folderOpen tasks are High (a folderOpen auto-task is unusual
+  in a legitimate repo and is the current infostealer vector of choice, so it
+  should trip `--fail-on-scan`); dev-container lifecycle commands and committed
+  git hooks are Low (both are common and legitimate - `postCreateCommand`
+  running `npm install`, a husky `pre-commit` - so the value is surfacing the
+  auto-run surface for review, while correlate/regex.go lift it if the command
+  is actually risky). `.husky/_` (husky's own bootstrap dir) and
+  comment/blank-only hooks are excluded to keep false positives down.
+- Scope, deliberately out: this slice does NOT teach the dynamic sandbox to
+  execute a folderOpen task (running an attacker's launcher on purpose is a
+  larger design question - which entrypoints to trust, how to bound them - and
+  the static tripwire is the higher-confidence, cheaper win). `.vscode/
+  settings.json` auto-exec keys are also left for later: the high-signal, low-
+  false-positive targets are folderOpen tasks, dev-container commands, and
+  committed hooks.

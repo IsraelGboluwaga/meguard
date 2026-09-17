@@ -117,6 +117,7 @@ func analyzers() []Analyzer {
 		manifestAnalyzer{},
 		entropyAnalyzer{},
 		regexAnalyzer{},
+		autorunAnalyzer{},
 	}
 }
 
