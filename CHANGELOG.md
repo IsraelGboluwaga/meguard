@@ -10,6 +10,18 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ### Changed
 
+- CI/release actions bumped past Node 20: `actions/checkout@v4` -> `@v5`,
+  `actions/setup-go@v5` -> `@v6` (both workflows), and
+  `goreleaser/goreleaser-action@v6` -> `@v7` (`.github/workflows/ci.yml`,
+  `.github/workflows/release.yml`). Clears the GitHub deprecation warning that
+  those pinned versions run on Node 20 (auto-forced to Node 24). Behavior is
+  unchanged.
+- README rewritten for concision and readability: same facts and safety model,
+  far less prose. Install docs (README.md and docs/launch.md) now show the
+  explicit `brew tap` and `brew trust` steps and say why they are needed
+  (meguard is not in homebrew-core, so the third-party tap must be added and
+  trusted first).
+
 - Compact `meguard run` no longer prints the raw sealed-install log when the
   containerized prefetch already failed (`cmd/run.go`). When prefetch fails,
   its npm log is flushed as the root-cause diagnostic, and the single-phase

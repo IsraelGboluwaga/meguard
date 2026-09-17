@@ -66,6 +66,16 @@ Verify the pure build is genuinely cgo-free:
 
     go version -m meguard | grep CGO_ENABLED    # expect: CGO_ENABLED=0
 
+## Homebrew
+
+meguard is not in homebrew-core, so Homebrew will not find the formula until you
+add and trust the third-party tap. Tap it, trust it, then install (the release
+workflow pushes the formula to the tap; see Release automation below):
+
+    brew tap IsraelGboluwaga/tap
+    brew trust --cask israelgboluwaga/tap/meguard
+    brew install meguard
+
 ## go install
 
     go install github.com/IsraelGboluwaga/meguard@latest
