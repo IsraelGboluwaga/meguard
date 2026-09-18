@@ -8,7 +8,7 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-09-18
+## [0.2.1] - 2026-09-18
 
 ### Changed
 
