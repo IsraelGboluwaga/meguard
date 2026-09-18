@@ -8,6 +8,27 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-18
+
+### Changed
+
+- Node two-phase leg 2 (the sealed sandbox install) now runs `npm ci --offline`
+  instead of `npm install --offline` (`Ecosystem.OfflineInstallCmd` in
+  `internal/sandbox/detect.go`). `npm ci` installs strictly from the lockfile the
+  prefetch already produced and copied out, skipping the dependency-resolution /
+  ideal-tree pass `npm install` repeats every run, so the offline install is
+  faster. It runs the SAME install lifecycle scripts and builds the SAME tree
+  from the same offline cache, so dynamic-analysis coverage and every containment
+  invariant are unchanged. `npm ci` requires a lockfile, which leg 1's
+  `npm install` always writes and `copyCacheOut` always carries out; a prefetch
+  that produced none would make `npm ci` fail fast in the box (reported as an
+  install failure, containment unaffected). See decision 0028.
+- README now leads with `meguard run` and clarifies the open-in-editor warning
+  (scan a repo before you open it in any editor/IDE), tightening the wording
+  introduced with the `autorun` analyzer in 0.2.0.
+
+## [0.2.0] - 2026-09-17
+
 ### Added
 
 - New `autorun` static analyzer (`internal/analyze/autorun.go`) that flags
@@ -42,6 +63,20 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   `GIT_PROTOCOL_FROM_USER=0`, locking in the transport hardening from decision
   0027 (the fix was previously covered only on the `isGitURL` side).
 
+### Changed
+
+- CI/release actions bumped past Node 20: `actions/checkout@v4` -> `@v5`,
+  `actions/setup-go@v5` -> `@v6` (both workflows), and
+  `goreleaser/goreleaser-action@v6` -> `@v7` (`.github/workflows/ci.yml`,
+  `.github/workflows/release.yml`). Clears the GitHub deprecation warning that
+  those pinned versions run on Node 20 (auto-forced to Node 24). Behavior is
+  unchanged.
+- README rewritten for concision and readability: same facts and safety model,
+  far less prose. Install docs (README.md and docs/launch.md) now show the
+  explicit `brew tap` and `brew trust` steps and say why they are needed
+  (meguard is not in homebrew-core, so the third-party tap must be added and
+  trusted first).
+
 ### Security
 
 - Harden the host-side `git clone` against git's command-executing transports
@@ -59,41 +94,7 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   crafted transport string falls through to the safe local-path branch. See
   decision 0027.
 
-### Changed
-
-- Node two-phase leg 2 (the sealed sandbox install) now runs `npm ci --offline`
-  instead of `npm install --offline` (`Ecosystem.OfflineInstallCmd` in
-  `internal/sandbox/detect.go`). `npm ci` installs strictly from the lockfile the
-  prefetch already produced and copied out, skipping the dependency-resolution /
-  ideal-tree pass `npm install` repeats every run, so the offline install is
-  faster. It runs the SAME install lifecycle scripts and builds the SAME tree
-  from the same offline cache, so dynamic-analysis coverage and every containment
-  invariant are unchanged. `npm ci` requires a lockfile, which leg 1's
-  `npm install` always writes and `copyCacheOut` always carries out; a prefetch
-  that produced none would make `npm ci` fail fast in the box (reported as an
-  install failure, containment unaffected). See decision 0028.
-- CI/release actions bumped past Node 20: `actions/checkout@v4` -> `@v5`,
-  `actions/setup-go@v5` -> `@v6` (both workflows), and
-  `goreleaser/goreleaser-action@v6` -> `@v7` (`.github/workflows/ci.yml`,
-  `.github/workflows/release.yml`). Clears the GitHub deprecation warning that
-  those pinned versions run on Node 20 (auto-forced to Node 24). Behavior is
-  unchanged.
-- README rewritten for concision and readability: same facts and safety model,
-  far less prose. Install docs (README.md and docs/launch.md) now show the
-  explicit `brew tap` and `brew trust` steps and say why they are needed
-  (meguard is not in homebrew-core, so the third-party tap must be added and
-  trusted first).
-
-- Compact `meguard run` no longer prints the raw sealed-install log when the
-  containerized prefetch already failed (`cmd/run.go`). When prefetch fails,
-  its npm log is flushed as the root-cause diagnostic, and the single-phase
-  fallback then installs strictly offline with an unpopulated cache and no
-  network, so it fails with a foregone `getaddrinfo`/`EAI_AGAIN` error whose
-  actual cause is the prefetch failure already shown. Dumping that second log
-  stacked redundant noise on top of the real cause. The compact report's
-  `prefetch` and `install` status lines still record that both failed, and
-  `-v`/`--verbose` still streams every log live. The git clone progress and
-  the install-failure log for a non-prefetch failure are unchanged.
+## [0.1.0] - 2026-09-09
 
 ### Added
 
@@ -207,133 +208,6 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   clean) and unused in `-v`/`--verbose` mode, which streams its own live
   output. Frames are plain ASCII; the run binary stays cgo-free (terminal
   detection uses `os.File.Stat`, no external dependency).
-
-### Security
-
-- Closed the host-arbitrary-file-read class in the node dependency prefetch
-  structurally instead of by string-matching (see decisions.md, decision
-  0021): the prefetch runs `npm install --ignore-scripts` inside its own
-  hardened, throwaway container with no host bind mounts
-  (`sandbox.RunPrefetch` / `prefetchCreateArgs`), never on the host. A
-  hostile local dependency spec in `package.json` (`file:`, a bare path,
-  `overrides`, a workspace glob, a lockfile entry, ...) can therefore only
-  ever resolve against the prefetch container's own filesystem, never the
-  host's, so no manifest/lockfile parsing or path allowlist is needed to
-  detect it. This supersedes an earlier host-side prefetch design (with
-  `.npmrc` stripping, a minimal environment, an npm-version gate, and
-  host-side local-dependency-spec parsing) that a security review found
-  could not reliably close this class by string-matching alone across
-  npm's open-ended set of local-spec forms; that host-side machinery has
-  been removed entirely in favor of the container.
-- Hardened the prefetch cache extraction against a host symlink-plant
-  (CWE-59): the cache is streamed out of the container as a tar over a
-  repo-influenced subtree and extracted on the host, so `untarInto`
-  (`internal/sandbox/prefetch.go`) now materializes only directories and
-  regular files, validates each entry name stays within the destination, and
-  SKIPS symlink entries entirely (an npm cache needs none), so a crafted
-  `.meguard-cache/x -> ~/.ssh/id_rsa` entry can never be recreated on the
-  host. Covered by `TestUntarIntoSkipsSymlinks`/`TestUntarIntoRejectsTraversal`.
-
-### Changed
-
-- Static scan now skips more Python dependency trees and inert tool caches
-  (`skipDirNames` in `internal/analyze/walk.go`): added `env`, `.tox`,
-  `.eggs`, `.mypy_cache`, `.pytest_cache`, and glob-named packaging metadata
-  dirs `*.egg-info`/`*.dist-info` (via the new `isGeneratedMetadataDir`), on
-  top of the existing `node_modules`/`vendor`/`.next`/`__pycache__`/`venv`/
-  `.venv`. The dependency trees hold installed package code that CAN carry a
-  payload, but so does `node_modules`, which was always skipped: containment
-  (the sandboxed run), not the advisory scan, is the safety net, and these
-  trees are normally gitignored and created at install time in the container.
-  `dist/`/`build/` remain walked. Cuts scan noise and time on Python repos.
-- Compact `meguard run` no longer echoes the invoked `meguard run <source>`
-  command back as a header line (the user already typed it). Compact
-  `meguard scan` likewise drops the repeated source path; its header is now
-  just `meguard scan (no container; read-only)`. Verbose output is unchanged.
-
-- `meguard run` and `meguard scan` default output is now COMPACT instead of
-  the previous full detail: a one-line header, a per-stage status checklist
-  (`sandbox`/`install`/`scan`/`egress`/`secrets` for `run`; `scan` alone for
-  `scan`, using `✓`/`!`/`✗` glyphs), a "Top findings" block that lists every
-  High/Critical finding individually (capped at 8) with everything else
-  rolled into one "... N more" summary line (grouped by analyzer, with a
-  "mostly `<dir>`/*" hint when one directory dominates), and a single
-  free-text `RESULT: ...` sentence. The raw install log is captured but only
-  printed if the install exited non-zero. New `-v`/`--verbose` flag on both
-  commands restores the exact previous behavior: the `meguard: preparing
-  locked-down sandbox` header with the full active-protections prose, every
-  scan finding listed individually with its snippet under `STATIC SCAN`, and
-  the streamed `SANDBOX OUTPUT` section. Presentation only: detection,
-  containment, exit codes, `--fail-on-scan`, and `--no-scan` behave
-  identically in both modes.
-- `sandbox.ExecuteOptions` gained a `Diag io.Writer` field
-  (`internal/sandbox/execute.go`) for meguard's own operational diagnostics
-  (cleanup failures, egress-monitor-read failures), separate from the install
-  command's own Stdout/Stderr. Falls back to `Stderr` when unset, so this is
-  additive and does not change behavior for any existing caller that has not
-  set it.
-- Default node image bumped from `node:20-slim` to `node:22-slim`
-  (`sandbox.DefaultImage` in `internal/sandbox/profile.go`; used by
-  `detectNode`). Node 20 reached end-of-life, so the auto-detect default now
-  points at a supported LTS. An explicit `--image` still overrides detection,
-  and the zero-value Profile is unaffected as a security control (image is a
-  RELAX value only; invariant 3). New `TestDefaultImageIsSupportedNodeLTS`
-  (`internal/sandbox/profile_test.go`) pins the default so a future edit
-  cannot silently revert it to an EOL base.
-- The containerized prefetch's npm log now honors compact mode
-  (`cmd/run.go`, `cmd/prefetch.go`). Previously the prefetch leg streamed all
-  of npm's output (`EBADENGINE`/deprecation warnings, the package count) to
-  the terminal on every run, even without `-v`, so a clean run buried its
-  status checklist under a warning wall. It is now captured into a buffer and
-  discarded on success, flushed to stderr only if the prefetch fails (the one
-  case where that log is the diagnostic), and streamed live under a
-  `PREFETCH OUTPUT` header only in `-v` - exactly matching how the in-sandbox
-  install log already behaved. A new `PrefetchOptions.Diag` channel
-  (`internal/sandbox/prefetch.go`) keeps meguard's own prefetch-cleanup
-  diagnostics (a `docker rm -f` failure) on the real stderr regardless, so
-  buffering the npm log can never swallow a cleanup failure (mirrors
-  `ExecuteOptions.Diag`; decision 0017).
-
-### Fixed
-
-- `DockerRunner.Create` (`internal/sandbox/docker.go`) now force-removes the
-  container it just tried to create if the `docker create` CLI invocation
-  itself returns an error. The daemon can create the container even when the
-  CLI call fails (for example the context is cancelled right at that
-  boundary, or a future stdout-parse failure), and `Execute` only registers
-  its cleanup defer once `Create` returns a non-empty id, so a
-  created-but-error container previously leaked. `docker rm -f` on a name
-  that was never actually created is a harmless no-op. Closes a narrow gap in
-  safety invariant 5 (cleanup on every path). New test:
-  `TestCreateRemovesContainerOnFailure`.
-- Ecosystem detection: a repo that is just a bare Python script with no
-  manifest (a top-level `*.py` and nothing else, for example a single
-  `apalara.py`) is now detected as python (`python:3.12-slim`) instead of
-  falling through to the node defaults and running `npm install` against a
-  missing `package.json`. New `hasTopLevelPyFile` fallback in
-  `internal/sandbox/detect.go` (`os.ReadDir` of the repo root, still top-level
-  and read-only, runs no repo code). There is nothing to install for a
-  manifest-less script, so its install command is a NO-OP (`python --version`);
-  run the script itself with an explicit `--cmd`. Manifests still win over this
-  fallback, and node still wins over python for a polyglot repo.
-- `entropy` analyzer: exclude a `.svg` file from the long-line/entropy
-  heuristic (`isSVGPath` in `internal/analyze/walk.go`, alongside the
-  existing `isMinifiedOrVendorPath`), but ONLY when it carries no `<script>`
-  tag (`svgScriptTagRe` in `internal/analyze/entropy.go`), fixing a false
-  positive on legitimate SVG icons where `<path d="...">`/`viewBox`
-  coordinate data reads as one long, moderately-high-entropy line without
-  being an obfuscated payload. An SVG that does carry a `<script>` tag is
-  executable, not static graphics, so it loses the exclusion for the whole
-  file. Either way the exclusion is entropy-only: `.svg` is deliberately NOT
-  added to `proseExtensions`, so `regex.go`'s signature checks (script tags,
-  eval, obfuscator fingerprints, exfil URLs, etc.) still scan ALL `.svg`
-  content unfiltered and at full severity regardless, since SVG can also
-  execute via `onload=`/`onclick=` handlers. New tests:
-  `TestEntropyAnalyzerExcludesSVGPathData`,
-  `TestEntropyAnalyzerScansSVGWithScriptTag`.
-
-### Added
-
 - Static scan, implemented (`internal/analyze`): manifest, entropy, and regex
   analyzers behind a single `Analyzer` interface, composed by `Scan(repoDir)`,
   which walks the repo once, runs every analyzer, then a correlation pass,
@@ -383,32 +257,6 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   reviewed architecture point: detection and containment are combined at the
   CLI layer, while the sandbox's containment guarantee stays structurally
   independent of scan.
-
-### Changed
-
-- Egress inspection is now the DEFAULT for `meguard run` (previously opt-in via
-  `--inspect-egress`, now removed). A plain `meguard run <repo>` logs every
-  blocked outbound attempt. The new `--strict` flag drops to `--network none`
-  (no network stack at all, no logs) for the hardest, fully-verified containment.
-  Egress is denied in both modes. Because inspected mode needs a monitor image +
-  NFLOG, the CLI FALLS BACK to `--network none` with a printed warning if the
-  monitor cannot start (`sandbox.ErrMonitorUnavailable`), so `meguard run` keeps
-  working everywhere and never silently loses containment. The library zero-value
-  Profile still selects `--network none`, so invariant 3 is unchanged; CLAUDE.md
-  invariant 4 is updated to "egress always denied, in one of two modes".
-  - VERIFIED on Docker/OrbStack (real Linux kernel): hardcoded-IP SYNs logged and
-    dropped, no leak to a sibling container on the bridge subnet, DNS captured by
-    name, IPv6 sealed, clean run reports "0 attempts", monitor-unavailable falls
-    back, no container leaks. Rootless runtimes not yet checked.
-  - Fixes found during that verification: (1) Execute now waits ~1.2s
-    (`monitorFlushDelay`) for tcpdump to flush before reading the monitor log, so
-    a single fast packet (one DNS query) is not missed by a read race; (2) a
-    clean inspected run (zero captured events) is now reported as "0 outbound
-    attempts" instead of being misreported as "monitor output could not be read"
-    - the read-failure path is now a distinct `Result.EgressReadFailed` signal.
-
-### Added
-
 - CI workflow (`.github/workflows/ci.yml`): runs on every push and pull request
   against `main`. Checks out, sets up Go from `go.mod`, then runs `gofmt -l`,
   `go mod verify`, `go build ./...`, `go vet ./...`, `go test ./...`, and a
@@ -440,7 +288,7 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
     can never reach the sandbox-create step.
   - Not over-claimed: the pre-run notice, result line, and README state the
     guarantee level rather than an unconditional "nothing leaves the host". Live
-    verification on Docker/OrbStack is recorded under Changed above.
+    verification on Docker/OrbStack is recorded under Changed below.
 - Ecosystem auto-detection (`sandbox.DetectEcosystem` in
   `internal/sandbox/detect.go`): `run` inspects the repo's top-level manifest
   files and picks the image and install command when `--image` / `--cmd` are
@@ -460,15 +308,6 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   runtime). The daemon is the trust boundary, so a rootless runtime shrinks the
   blast radius of a container escape from host root to an unprivileged user. The
   pre-run notice now names the runtime it is trusting.
-
-### Security
-
-- `git clone` on the host now passes `--` before the source
-  (`git clone --depth 1 -- <source> <dir>`) so a source beginning with `-` can
-  never be parsed as a git option. Defense in depth on top of the existing
-  `isGitURL` gate, on the one host command that touches an attacker-controlled
-  string.
-
 - `meguard run <repo-url-or-path>` executes an untrusted repo inside a
   locked-down container sandbox, end to end.
   - Lifecycle: `docker create` (hardened) -> `docker cp` repo into a tmpfs ->
@@ -524,6 +363,92 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ### Changed
 
+- Compact `meguard run` no longer prints the raw sealed-install log when the
+  containerized prefetch already failed (`cmd/run.go`). When prefetch fails,
+  its npm log is flushed as the root-cause diagnostic, and the single-phase
+  fallback then installs strictly offline with an unpopulated cache and no
+  network, so it fails with a foregone `getaddrinfo`/`EAI_AGAIN` error whose
+  actual cause is the prefetch failure already shown. Dumping that second log
+  stacked redundant noise on top of the real cause. The compact report's
+  `prefetch` and `install` status lines still record that both failed, and
+  `-v`/`--verbose` still streams every log live. The git clone progress and
+  the install-failure log for a non-prefetch failure are unchanged.
+- Static scan now skips more Python dependency trees and inert tool caches
+  (`skipDirNames` in `internal/analyze/walk.go`): added `env`, `.tox`,
+  `.eggs`, `.mypy_cache`, `.pytest_cache`, and glob-named packaging metadata
+  dirs `*.egg-info`/`*.dist-info` (via the new `isGeneratedMetadataDir`), on
+  top of the existing `node_modules`/`vendor`/`.next`/`__pycache__`/`venv`/
+  `.venv`. The dependency trees hold installed package code that CAN carry a
+  payload, but so does `node_modules`, which was always skipped: containment
+  (the sandboxed run), not the advisory scan, is the safety net, and these
+  trees are normally gitignored and created at install time in the container.
+  `dist/`/`build/` remain walked. Cuts scan noise and time on Python repos.
+- Compact `meguard run` no longer echoes the invoked `meguard run <source>`
+  command back as a header line (the user already typed it). Compact
+  `meguard scan` likewise drops the repeated source path; its header is now
+  just `meguard scan (no container; read-only)`. Verbose output is unchanged.
+- `meguard run` and `meguard scan` default output is now COMPACT instead of
+  the previous full detail: a one-line header, a per-stage status checklist
+  (`sandbox`/`install`/`scan`/`egress`/`secrets` for `run`; `scan` alone for
+  `scan`, using `✓`/`!`/`✗` glyphs), a "Top findings" block that lists every
+  High/Critical finding individually (capped at 8) with everything else
+  rolled into one "... N more" summary line (grouped by analyzer, with a
+  "mostly `<dir>`/*" hint when one directory dominates), and a single
+  free-text `RESULT: ...` sentence. The raw install log is captured but only
+  printed if the install exited non-zero. New `-v`/`--verbose` flag on both
+  commands restores the exact previous behavior: the `meguard: preparing
+  locked-down sandbox` header with the full active-protections prose, every
+  scan finding listed individually with its snippet under `STATIC SCAN`, and
+  the streamed `SANDBOX OUTPUT` section. Presentation only: detection,
+  containment, exit codes, `--fail-on-scan`, and `--no-scan` behave
+  identically in both modes.
+- `sandbox.ExecuteOptions` gained a `Diag io.Writer` field
+  (`internal/sandbox/execute.go`) for meguard's own operational diagnostics
+  (cleanup failures, egress-monitor-read failures), separate from the install
+  command's own Stdout/Stderr. Falls back to `Stderr` when unset, so this is
+  additive and does not change behavior for any existing caller that has not
+  set it.
+- Default node image bumped from `node:20-slim` to `node:22-slim`
+  (`sandbox.DefaultImage` in `internal/sandbox/profile.go`; used by
+  `detectNode`). Node 20 reached end-of-life, so the auto-detect default now
+  points at a supported LTS. An explicit `--image` still overrides detection,
+  and the zero-value Profile is unaffected as a security control (image is a
+  RELAX value only; invariant 3). New `TestDefaultImageIsSupportedNodeLTS`
+  (`internal/sandbox/profile_test.go`) pins the default so a future edit
+  cannot silently revert it to an EOL base.
+- The containerized prefetch's npm log now honors compact mode
+  (`cmd/run.go`, `cmd/prefetch.go`). Previously the prefetch leg streamed all
+  of npm's output (`EBADENGINE`/deprecation warnings, the package count) to
+  the terminal on every run, even without `-v`, so a clean run buried its
+  status checklist under a warning wall. It is now captured into a buffer and
+  discarded on success, flushed to stderr only if the prefetch fails (the one
+  case where that log is the diagnostic), and streamed live under a
+  `PREFETCH OUTPUT` header only in `-v` - exactly matching how the in-sandbox
+  install log already behaved. A new `PrefetchOptions.Diag` channel
+  (`internal/sandbox/prefetch.go`) keeps meguard's own prefetch-cleanup
+  diagnostics (a `docker rm -f` failure) on the real stderr regardless, so
+  buffering the npm log can never swallow a cleanup failure (mirrors
+  `ExecuteOptions.Diag`; decision 0017).
+- Egress inspection is now the DEFAULT for `meguard run` (previously opt-in via
+  `--inspect-egress`, now removed). A plain `meguard run <repo>` logs every
+  blocked outbound attempt. The new `--strict` flag drops to `--network none`
+  (no network stack at all, no logs) for the hardest, fully-verified containment.
+  Egress is denied in both modes. Because inspected mode needs a monitor image +
+  NFLOG, the CLI FALLS BACK to `--network none` with a printed warning if the
+  monitor cannot start (`sandbox.ErrMonitorUnavailable`), so `meguard run` keeps
+  working everywhere and never silently loses containment. The library zero-value
+  Profile still selects `--network none`, so invariant 3 is unchanged; CLAUDE.md
+  invariant 4 is updated to "egress always denied, in one of two modes".
+  - VERIFIED on Docker/OrbStack (real Linux kernel): hardcoded-IP SYNs logged and
+    dropped, no leak to a sibling container on the bridge subnet, DNS captured by
+    name, IPv6 sealed, clean run reports "0 attempts", monitor-unavailable falls
+    back, no container leaks. Rootless runtimes not yet checked.
+  - Fixes found during that verification: (1) Execute now waits ~1.2s
+    (`monitorFlushDelay`) for tcpdump to flush before reading the monitor log, so
+    a single fast packet (one DNS query) is not missed by a read race; (2) a
+    clean inspected run (zero captured events) is now reported as "0 outbound
+    attempts" instead of being misreported as "monitor output could not be read"
+    - the read-failure path is now a distinct `Result.EgressReadFailed` signal.
 - Copy mechanism and lifecycle order, forced by real end-to-end testing against
   a live runtime (OrbStack): Docker refuses `docker cp` into a `--read-only`
   container, so the repo is now streamed in as a deterministic in-process tar
@@ -533,6 +458,75 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   including `--read-only`, are retained; the security property of invariant 2 is
   unchanged. The container image must provide `tar` (standard in Debian/Alpine).
 
+### Fixed
+
+- `DockerRunner.Create` (`internal/sandbox/docker.go`) now force-removes the
+  container it just tried to create if the `docker create` CLI invocation
+  itself returns an error. The daemon can create the container even when the
+  CLI call fails (for example the context is cancelled right at that
+  boundary, or a future stdout-parse failure), and `Execute` only registers
+  its cleanup defer once `Create` returns a non-empty id, so a
+  created-but-error container previously leaked. `docker rm -f` on a name
+  that was never actually created is a harmless no-op. Closes a narrow gap in
+  safety invariant 5 (cleanup on every path). New test:
+  `TestCreateRemovesContainerOnFailure`.
+- Ecosystem detection: a repo that is just a bare Python script with no
+  manifest (a top-level `*.py` and nothing else, for example a single
+  `apalara.py`) is now detected as python (`python:3.12-slim`) instead of
+  falling through to the node defaults and running `npm install` against a
+  missing `package.json`. New `hasTopLevelPyFile` fallback in
+  `internal/sandbox/detect.go` (`os.ReadDir` of the repo root, still top-level
+  and read-only, runs no repo code). There is nothing to install for a
+  manifest-less script, so its install command is a NO-OP (`python --version`);
+  run the script itself with an explicit `--cmd`. Manifests still win over this
+  fallback, and node still wins over python for a polyglot repo.
+- `entropy` analyzer: exclude a `.svg` file from the long-line/entropy
+  heuristic (`isSVGPath` in `internal/analyze/walk.go`, alongside the
+  existing `isMinifiedOrVendorPath`), but ONLY when it carries no `<script>`
+  tag (`svgScriptTagRe` in `internal/analyze/entropy.go`), fixing a false
+  positive on legitimate SVG icons where `<path d="...">`/`viewBox`
+  coordinate data reads as one long, moderately-high-entropy line without
+  being an obfuscated payload. An SVG that does carry a `<script>` tag is
+  executable, not static graphics, so it loses the exclusion for the whole
+  file. Either way the exclusion is entropy-only: `.svg` is deliberately NOT
+  added to `proseExtensions`, so `regex.go`'s signature checks (script tags,
+  eval, obfuscator fingerprints, exfil URLs, etc.) still scan ALL `.svg`
+  content unfiltered and at full severity regardless, since SVG can also
+  execute via `onload=`/`onclick=` handlers. New tests:
+  `TestEntropyAnalyzerExcludesSVGPathData`,
+  `TestEntropyAnalyzerScansSVGWithScriptTag`.
+
+### Security
+
+- Closed the host-arbitrary-file-read class in the node dependency prefetch
+  structurally instead of by string-matching (see decisions.md, decision
+  0021): the prefetch runs `npm install --ignore-scripts` inside its own
+  hardened, throwaway container with no host bind mounts
+  (`sandbox.RunPrefetch` / `prefetchCreateArgs`), never on the host. A
+  hostile local dependency spec in `package.json` (`file:`, a bare path,
+  `overrides`, a workspace glob, a lockfile entry, ...) can therefore only
+  ever resolve against the prefetch container's own filesystem, never the
+  host's, so no manifest/lockfile parsing or path allowlist is needed to
+  detect it. This supersedes an earlier host-side prefetch design (with
+  `.npmrc` stripping, a minimal environment, an npm-version gate, and
+  host-side local-dependency-spec parsing) that a security review found
+  could not reliably close this class by string-matching alone across
+  npm's open-ended set of local-spec forms; that host-side machinery has
+  been removed entirely in favor of the container.
+- Hardened the prefetch cache extraction against a host symlink-plant
+  (CWE-59): the cache is streamed out of the container as a tar over a
+  repo-influenced subtree and extracted on the host, so `untarInto`
+  (`internal/sandbox/prefetch.go`) now materializes only directories and
+  regular files, validates each entry name stays within the destination, and
+  SKIPS symlink entries entirely (an npm cache needs none), so a crafted
+  `.meguard-cache/x -> ~/.ssh/id_rsa` entry can never be recreated on the
+  host. Covered by `TestUntarIntoSkipsSymlinks`/`TestUntarIntoRejectsTraversal`.
+- `git clone` on the host now passes `--` before the source
+  (`git clone --depth 1 -- <source> <dir>`) so a source beginning with `-` can
+  never be parsed as a git option. Defense in depth on top of the existing
+  `isGitURL` gate, on the one host command that touches an attacker-controlled
+  string.
+
 ### Notes
 
 - The `run` binary is pure Go (no cgo) and ships as a single static file.
@@ -541,6 +535,5 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
   logs). If the monitor cannot start, the CLI falls back to `--network none`.
 - `--memory` and `--cpus` are conservative defaults that will become
   user-configurable.
-- scan (manifest, entropy, regex analyzers) is implemented; see the Added
-  entry near the top of this file. The AST/tree-sitter analyzer is still NOT
-  implemented, a labeled no-op on both build variants.
+- scan (manifest, entropy, regex analyzers) is implemented. The AST/tree-sitter
+  analyzer is NOT implemented, a labeled no-op on both build variants.
