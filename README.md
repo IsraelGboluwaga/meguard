@@ -148,7 +148,7 @@ stages and disappears when output is piped.
 
     ✓ sandbox    node:22-slim, network denied (--strict, no logs), ephemeral
     ✓ prefetch   dependencies fetched in a no-host-mount container (no scripts run); deps install in-box
-    ✓ install    npm install --offline --no-audit --no-fund --cache /repo/.meguard-cache (exit 0)
+    ✓ install    npm ci --offline --no-audit --no-fund --cache /repo/.meguard-cache (exit 0)
     ✓ exec       ran build (exit 0), start (observed then stopped)
     ! scan       8 finding(s) (2 high, 6 medium) across 8 files
     ✓ egress     denied (--network none, no logs)
@@ -203,10 +203,14 @@ node, meguard fixes this with a two-phase install (on by default):
    resolve inside that container, never on your host. Only the populated cache
    (and any generated lockfile) is copied back out; `node_modules` is not.
 2. **Install**: installs strictly offline from that cache with the network fully
-   sealed. Because the dependency tree is already on disk, every lifecycle
-   script - the repo's and every transitive dependency's - runs in the sealed
-   box, where outbound attempts are logged and dropped. This is what catches a
-   transitive dependency phoning a non-registry host.
+   sealed, using `npm ci` against the lockfile the prefetch produced. `npm ci`
+   installs straight from the lockfile and skips the dependency-resolution pass
+   `npm install` repeats every run, so leg 2 is faster while running the *same*
+   lifecycle scripts and building the *same* tree from the same offline cache.
+   Because the dependency tree is already on disk, every lifecycle script - the
+   repo's and every transitive dependency's - runs in the sealed box, where
+   outbound attempts are logged and dropped. This is what catches a transitive
+   dependency phoning a non-registry host.
 
 `--no-prefetch` (or an explicit `--cmd`) restores the single-phase install (the
 sandbox has no network, so only the repo's own root scripts run). Prefetch is
