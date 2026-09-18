@@ -141,7 +141,18 @@ func detectNode(root string) (Ecosystem, bool) {
 				// guarantees no egress path is needed and fails fast if anything
 				// is missing. Every lifecycle script (root AND transitive deps)
 				// runs here, in the box, where its egress is logged and dropped.
-				OfflineInstallCmd: []string{"npm", "install", "--offline", "--no-audit", "--no-fund", "--cache", ContainerCacheDir},
+				//
+				// `npm ci` (not `npm install`) installs STRICTLY from the lockfile
+				// leg 1 produced and copied out (see copyCacheOut), skipping the
+				// dependency-resolution / ideal-tree pass `npm install` redoes every
+				// run. It is measurably faster while running the SAME install
+				// lifecycle scripts and building the SAME tree from the same offline
+				// cache, so the dynamic-analysis coverage is unchanged. It requires a
+				// lockfile, which leg 1's `npm install` always writes (package-lock.json)
+				// and copyCacheOut always carries out, so it is present here; if a
+				// prefetch ever produced none, `npm ci` fails fast in the box and the
+				// run is reported as an install failure (containment is unaffected).
+				OfflineInstallCmd: []string{"npm", "ci", "--offline", "--no-audit", "--no-fund", "--cache", ContainerCacheDir},
 			}, true
 		}
 	}

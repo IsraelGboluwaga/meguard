@@ -314,12 +314,21 @@ either way.
    so it travels into the SEALED sandbox with the normal tar-in copy
    (`sandbox.ContainerCacheDir`, `/repo/.meguard-cache`) with no extra mount.
 2. SANDBOX install: `cmd/run.go` swaps `profile.InstallCmd` for
-   `eco.OfflineInstallCmd` (`npm install --offline --no-audit --no-fund
-   --cache /repo/.meguard-cache`). The network is still fully sealed (same
-   `--network none` / monitor-netns mechanism as any other run; nothing about
-   containment changes) but the full dependency tree is already on disk, so
-   every lifecycle script - root and every transitive dependency - actually
-   executes inside the box, where its egress is logged and dropped. This is
+   `eco.OfflineInstallCmd` (`npm ci --offline --no-audit --no-fund
+   --cache /repo/.meguard-cache`). `npm ci` (not `npm install`) installs
+   strictly from the lockfile leg 1 produced and `copyCacheOut` carried out,
+   skipping the dependency-resolution / ideal-tree pass `npm install` redoes
+   every run; it is faster while running the SAME install lifecycle scripts and
+   building the SAME tree from the same offline cache, so dynamic-analysis
+   coverage is unchanged. It requires a lockfile, which leg 1's `npm install`
+   always writes (`package-lock.json`) and `copyCacheOut` always carries out;
+   if a prefetch ever produced none, `npm ci` fails fast in the box and the run
+   is reported as an install failure (containment is unaffected). The network
+   is still fully sealed (same `--network none` / monitor-netns mechanism as any
+   other run; nothing about containment changes) but the full dependency tree is
+   already on disk, so every lifecycle script - root and every transitive
+   dependency - actually executes inside the box, where its egress is logged and
+   dropped. This is
    the point of the redesign: it is what lets meguard observe a transitive
    dependency's `postinstall` phoning a non-registry host, which the
    single-phase, network-less fallback never even attempts because dependency

@@ -13,7 +13,7 @@ import (
 var (
 	nodeInstallCmd        = []string{"npm", "install", "--no-audit", "--no-fund", "--fetch-retries=0"}
 	nodePrefetchCmd       = []string{"npm", "install", "--ignore-scripts", "--no-audit", "--no-fund", "--registry=https://registry.npmjs.org/", "--cache", CacheDirPlaceholder}
-	nodeOfflineInstallCmd = []string{"npm", "install", "--offline", "--no-audit", "--no-fund", "--cache", ContainerCacheDir}
+	nodeOfflineInstallCmd = []string{"npm", "ci", "--offline", "--no-audit", "--no-fund", "--cache", ContainerCacheDir}
 )
 
 // TestDetectEcosystem is a table-driven test of manifest-to-ecosystem mapping.

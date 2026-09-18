@@ -812,3 +812,54 @@ here.
   protocol policy. Denies by default (only four transports allowed), overrides
   hostile config, and states the guarantee in code, tests, and docs rather than
   leaning on a git default that varies by host.
+
+## 0028 - Node offline install uses `npm ci`, not `npm install`
+
+- Context: the two-phase node install (decision 0021) runs leg 2 in the sealed
+  sandbox to fire every dependency lifecycle script where its egress is observed.
+  Leg 2 was `npm install --offline`, which repeats the full dependency-resolution
+  / ideal-tree pass on every run even though leg 1 already produced a lockfile and
+  `copyCacheOut` carries it into the box. That resolution is redundant work on the
+  hot path of `meguard run`, which the user asked to make faster (target under 20s
+  for a typical repo).
+- Investigated a bigger change first: copy `node_modules` out of the prefetch
+  container and run `npm rebuild --offline` in the sandbox, skipping BOTH
+  resolution and re-linking. REJECTED for now: the prefetch and sandbox containers
+  do not overlap in the current lifecycle (the prefetch container is force-removed
+  before the sandbox is created), so a safe container-to-container stream of
+  `node_modules` would require restructuring `cmd/run.go` to keep both alive at
+  once and entangle the monitor path; the non-invasive alternative round-trips a
+  large `node_modules` tree through host disk, which reintroduces a symlink
+  host-escape surface (`node_modules` has `.bin`/workspace symlinks the cache does
+  not; `untarInto` deliberately skips symlinks) and adds tar-transport cost that
+  offsets much of the win, since `npm rebuild` still needs the whole tree
+  materialized first.
+- Decision: change leg 2 to `npm ci --offline --no-audit --no-fund --cache
+  /repo/.meguard-cache` (`Ecosystem.OfflineInstallCmd`, `internal/sandbox/detect.go`).
+  `npm ci` installs strictly from the lockfile and skips the resolution pass, so
+  it is faster, while running the SAME install lifecycle scripts (preinstall /
+  install / postinstall for the root and every transitive dependency) and building
+  the SAME tree from the same offline cache. Containment is untouched: same sealed
+  netns, same no-host-mounts, same `--offline`; only the resolution work is removed.
+  `TestDetectEcosystem`'s `nodeOfflineInstallCmd` fixture is updated to the new
+  argv, keeping the guard that fails the moment `detectNode`'s command drifts.
+- Alternatives: keep `npm install --offline` (REJECTED: pays for resolution every
+  run for no benefit once a lockfile exists). Add `--prefer-offline` to
+  `npm install` (REJECTED: changes fetch fallback, not the resolution cost, so it
+  does not address the redundancy). The `node_modules` + `npm rebuild` mechanism
+  (REJECTED above; may revisit if the lifecycle is restructured to overlap the two
+  containers, which would make the container-to-container stream safe and cheap).
+- Risk: `npm ci` requires a lockfile in sync with `package.json`. Leg 1's
+  `npm install` always writes `package-lock.json` (and `copyCacheOut` always
+  carries it out), so one is present here even for a repo that shipped none. The
+  one way a prefetch produces no lockfile is a repo that ships an `.npmrc` with
+  `package-lock=false` (or `--no-package-lock`); `copyCacheOut`'s
+  `$(ls package-lock.json ... 2>/dev/null)` then simply omits it, and leg 2's
+  `npm ci --offline` fails fast in the box. That is an availability/UX nit (a
+  crafted `.npmrc` can force an install-failure signal), NOT a containment or
+  egress weakening: an install failure never triggers any fallback outside the
+  container - `cmd/run.go`'s prefetch/fallback logic only ever chooses between two
+  IN-SANDBOX install commands (offline vs the single-phase attempt that itself
+  fails under `--network none`), never an unsandboxed or network-open path. So it
+  fails safe, and the compact report still records the failure. Confirmed by the
+  security-reviewer gate on this change.

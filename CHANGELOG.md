@@ -61,6 +61,17 @@ meguard stays on 0.x until the CLI surface and any JSON schema stabilize.
 
 ### Changed
 
+- Node two-phase leg 2 (the sealed sandbox install) now runs `npm ci --offline`
+  instead of `npm install --offline` (`Ecosystem.OfflineInstallCmd` in
+  `internal/sandbox/detect.go`). `npm ci` installs strictly from the lockfile the
+  prefetch already produced and copied out, skipping the dependency-resolution /
+  ideal-tree pass `npm install` repeats every run, so the offline install is
+  faster. It runs the SAME install lifecycle scripts and builds the SAME tree
+  from the same offline cache, so dynamic-analysis coverage and every containment
+  invariant are unchanged. `npm ci` requires a lockfile, which leg 1's
+  `npm install` always writes and `copyCacheOut` always carries out; a prefetch
+  that produced none would make `npm ci` fail fast in the box (reported as an
+  install failure, containment unaffected). See decision 0028.
 - CI/release actions bumped past Node 20: `actions/checkout@v4` -> `@v5`,
   `actions/setup-go@v5` -> `@v6` (both workflows), and
   `goreleaser/goreleaser-action@v6` -> `@v7` (`.github/workflows/ci.yml`,
